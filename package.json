@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start --port 3100",
     "lint": "eslint",
-    "typecheck": "prisma generate && tsc --noEmit",
+    "typecheck": "prisma generate && next typegen && tsc --noEmit",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",

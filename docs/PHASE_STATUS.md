@@ -52,6 +52,7 @@
 | Integration tests | `npm run test:integration` | 11 passed (2 files) |
 | Production build | `npm run build` | exit 0 |
 | End-to-end | `npm run test:e2e` | 4 passed (3 desktop, 1 phone) |
+| Fresh clone | `git clone`, `npm ci`, typecheck, lint, unit, integration, build, e2e | all passed; found that `typecheck` needed `next typegen` first (fixed) |
 
 The integration and e2e tests run against `promptcraft_test`, never against the development
 database.
