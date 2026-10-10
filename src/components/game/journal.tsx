@@ -1,6 +1,8 @@
 "use client";
 
-import { CheckCircle2, Circle, FileSearch, Package, ScrollText, Siren } from "lucide-react";
+import { CheckCircle2, Circle, FileSearch, Network, Package, ScrollText, Siren } from "lucide-react";
+import { CaseBoard } from "./case-board";
+import type { Command } from "./game-client";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { GameView, Reliability, Severity } from "@/lib/game-types";
 import { cn } from "@/lib/utils";
@@ -17,7 +19,7 @@ const SEVERITY: Record<Severity, string> = { INFO: "border-line", NOTICE: "borde
 const provenanceText = (p: string) =>
   p.startsWith("investigated:") ? `Found while investigating` : p.startsWith("given-by:") ? `Given by ${p.slice(9).replace(/^./, (c) => c.toUpperCase())}` : p;
 
-export function Journal({ view }: { view: GameView }) {
+export function Journal({ view, run, busy }: { view: GameView; run: (command: Command) => Promise<boolean>; busy: boolean }) {
   const activeCount = view.quests.filter((q) => q.status === "ACTIVE").length;
   return (
     <Tabs defaultValue="quests" className="frame gap-0 p-0">
@@ -31,7 +33,14 @@ export function Journal({ view }: { view: GameView }) {
         <TabsTrigger value="evidence" className="gap-1.5">
           <FileSearch aria-hidden="true" /> Evidence <span className="font-mono text-xs text-dim">{view.evidence.length}</span>
         </TabsTrigger>
+        <TabsTrigger value="case" className="gap-1.5">
+          <Network aria-hidden="true" /> Case
+        </TabsTrigger>
       </TabsList>
+
+      <TabsContent value="case" className="p-0">
+        <CaseBoard view={view} run={run} busy={busy} />
+      </TabsContent>
 
       <TabsContent value="quests" className="space-y-4 p-4">
         {view.quests.length === 0 && <p className="text-sm text-dim">No quests yet. Someone in the Slums is looking for help: talk to Balthazar.</p>}

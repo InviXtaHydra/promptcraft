@@ -155,7 +155,7 @@ function MemoryTable({ items }: { items: { content: string; score: number; simil
   );
 }
 
-function RunDetailView({ run }: { run: RunDetail }) {
+function RunDetailView({ run, sessionId }: { run: RunDetail; sessionId: string }) {
   const memoryStep = run.steps.find((s) => s.node === "retrieve_memories");
   const memories = ((memoryStep?.data as { items?: { content: string; score: number; similarity: number; thisInvestigation: boolean }[] } | null)?.items ?? []) as {
     content: string;
@@ -246,6 +246,7 @@ function RunDetailView({ run }: { run: RunDetail }) {
           ))}
         </ul>
       </section>
+      <ReplayButton sessionId={sessionId} runId={run.id} />
       <section aria-label="State changes">
         <h4 className="font-display text-sm font-semibold">Database state changes</h4>
         {changes.length === 0 ? (
@@ -270,6 +271,8 @@ function RunsHistory({ sessionId, refreshKey }: { sessionId: string; refreshKey:
   const [runs, setRuns] = useState<RunSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<RunDetail | null>(null);
+  const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [comparison, setComparison] = useState<[RunDetail, RunDetail] | null>(null);
   const [reload, setReload] = useState(0);
   // NPCs that appear in this save game's runs, for the filter (kept when a filter narrows the list)
   const [known, setKnown] = useState<Map<string, string>>(new Map());
@@ -304,13 +307,33 @@ function RunsHistory({ sessionId, refreshKey }: { sessionId: string; refreshKey:
     [sessionId],
   );
 
+  async function compare() {
+    try {
+      const [a, b] = await Promise.all(compareIds.map((id) => api<{ run: RunDetail }>(`/api/sessions/${sessionId}/runs/${id}`).then((r) => r.run)));
+      setComparison([a, b]);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Couldn't load the runs");
+    }
+  }
+
+  if (comparison) {
+    return (
+      <div>
+        <button type="button" onClick={() => setComparison(null)} className="mb-3 text-sm text-cyan underline-offset-4 hover:underline">
+          ← All runs
+        </button>
+        <CompareRuns a={comparison[0]} b={comparison[1]} />
+      </div>
+    );
+  }
+
   if (selected) {
     return (
       <div>
         <button type="button" onClick={() => setSelected(null)} className="mb-3 text-sm text-cyan underline-offset-4 hover:underline">
           ← All runs
         </button>
-        <RunDetailView run={selected} />
+        <RunDetailView run={selected} sessionId={sessionId} />
       </div>
     );
   }
@@ -339,6 +362,15 @@ function RunsHistory({ sessionId, refreshKey }: { sessionId: string; refreshKey:
             ))}
           </select>
         </label>
+        <button
+          type="button"
+          disabled={compareIds.length !== 2}
+          onClick={() => void compare()}
+          className="rounded border border-line px-2 py-1 text-xs text-dim hover:text-text disabled:opacity-40"
+          title="Tick two runs to compare them"
+        >
+          Compare ({compareIds.length}/2)
+        </button>
         <button type="button" onClick={() => setReload((n) => n + 1)} className="ml-auto inline-flex items-center gap-1 text-xs text-dim hover:text-text">
           <RefreshCw className="size-3.5" aria-hidden="true" /> Refresh
         </button>
@@ -352,7 +384,14 @@ function RunsHistory({ sessionId, refreshKey }: { sessionId: string; refreshKey:
       {runs?.length === 0 && <p className="py-8 text-center text-sm text-dim">No runs match these filters yet.</p>}
       <ul className="space-y-1.5">
         {runs?.map((r) => (
-          <li key={r.id}>
+          <li key={r.id} className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              aria-label={`Compare run ${r.id.slice(-6)}`}
+              checked={compareIds.includes(r.id)}
+              onChange={(e) => setCompareIds((ids) => (e.target.checked ? [...ids, r.id].slice(-2) : ids.filter((x) => x !== r.id)))}
+              className="mt-3 accent-[var(--cyan)]"
+            />
             <button type="button" onClick={() => void open(r.id)} className="w-full rounded-md border border-line p-2.5 text-left transition-colors hover:border-cyan/50">
               <span className="flex items-center gap-2 text-sm">
                 <StatusIcon status={r.status} />
@@ -378,12 +417,14 @@ export function AgentDebugger({
   sessionId,
   liveEvents,
   refreshKey,
+  onView,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   sessionId: string;
   liveEvents: TurnStreamEvent[];
   refreshKey: number;
+  onView: (view: unknown) => void;
 }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -396,6 +437,8 @@ export function AgentDebugger({
           <TabsList>
             <TabsTrigger value="live">Live turn</TabsTrigger>
             <TabsTrigger value="runs">All runs</TabsTrigger>
+            <TabsTrigger value="metrics">Metrics</TabsTrigger>
+            <TabsTrigger value="simulation">Simulation</TabsTrigger>
           </TabsList>
           <TabsContent value="live" className={cn("pt-3")}>
             <LiveTurn events={liveEvents} />
@@ -403,8 +446,287 @@ export function AgentDebugger({
           <TabsContent value="runs" className="pt-3">
             <RunsHistory sessionId={sessionId} refreshKey={refreshKey} />
           </TabsContent>
+          <TabsContent value="metrics" className="pt-3">
+            <MetricsPanel sessionId={sessionId} refreshKey={refreshKey} />
+          </TabsContent>
+          <TabsContent value="simulation" className="pt-3">
+            <SimulationPanel sessionId={sessionId} refreshKey={refreshKey} onView={onView} />
+          </TabsContent>
         </Tabs>
       </SheetContent>
     </Sheet>
+  );
+}
+
+// ─── Phase 3: metrics, comparison, replay, simulation ───────────────────────────────────────────
+
+type Metrics = {
+  runs: { total: number; byStatus: Record<string, number>; simulated: number; providers: string[] };
+  latencyMs: { measured: boolean; p50: number | null; p95: number | null; max: number | null };
+  tokens: { measured: boolean; input: number; output: number; modelCalls: number; retries: number };
+  cost: { estimated: boolean; usd: number; note: string };
+  tools: { total: number; byTool: { tool: string; executed: number; rejected: number }[]; topRejections: { reason: string; count: number }[] };
+  retrieval: { turns: number; turnsWithMemories: number; unavailable: number; avgRecalled: number | null; avgTopSimilarity: number | null; avgScore: number | null };
+  nodes: { node: string; count: number; avgMs: number | null }[];
+  simulation: { ticks: number; executed: number; rejected: number; skipped: number; avgTickMs: number | null };
+};
+
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-md border border-line p-2.5">
+      <p className="text-[0.7rem] text-dim">{label}</p>
+      <p className="font-mono text-sm">{value}</p>
+      {hint && <p className="text-[0.65rem] text-dim">{hint}</p>}
+    </div>
+  );
+}
+
+export function MetricsPanel({ sessionId, refreshKey }: { sessionId: string; refreshKey: number }) {
+  const [m, setM] = useState<Metrics | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    api<{ metrics: Metrics }>(`/api/sessions/${sessionId}/metrics`, { signal: controller.signal })
+      .then((r) => setM(r.metrics))
+      .catch((e) => !controller.signal.aborted && setError(e instanceof ApiError ? e.message : "Couldn't load metrics"));
+    return () => controller.abort();
+  }, [sessionId, refreshKey]);
+  if (error) return <p role="alert" className="text-sm text-danger">{error}</p>;
+  if (!m) return <div className="h-24 animate-pulse rounded-md border border-line bg-panel-2" />;
+  if (m.runs.total === 0 && m.simulation.ticks === 0) return <p className="py-8 text-center text-sm text-dim">No agent activity yet in this investigation.</p>;
+  const pct = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "–");
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-dim">Measured: latency (server timers) and tokens (Ollama&apos;s counts). Estimated: cost.</p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <Stat label="Runs" value={`${m.runs.total}`} hint={`${m.runs.byStatus.SUCCEEDED} ok · ${m.runs.byStatus.FAILED} failed · ${m.runs.byStatus.CANCELLED} cancelled`} />
+        <Stat label="Latency p50 / p95 (measured)" value={`${ms(m.latencyMs.p50)} / ${ms(m.latencyMs.p95)}`} />
+        <Stat label="Tokens in / out (measured)" value={`${m.tokens.input} / ${m.tokens.output}`} hint={`${m.tokens.modelCalls} model calls · ${m.tokens.retries} retries`} />
+        <Stat label="Cost (estimate)" value={`$${m.cost.usd.toFixed(4)}`} hint={m.cost.note} />
+        <Stat label="Turns with memories" value={pct(m.retrieval.turnsWithMemories, m.retrieval.turns)} hint={`avg ${m.retrieval.avgRecalled ?? "–"} recalled · ${m.retrieval.unavailable} unavailable`} />
+        <Stat label="Retrieval quality" value={`top sim ${m.retrieval.avgTopSimilarity ?? "–"}`} hint={`avg score ${m.retrieval.avgScore ?? "–"}`} />
+      </div>
+      <section aria-label="Tool call metrics">
+        <h4 className="mb-2 font-display text-sm font-semibold">Tool calls</h4>
+        <table className="w-full text-left text-xs">
+          <thead className="text-dim">
+            <tr>
+              <th className="py-1 font-normal">Tool</th>
+              <th className="py-1 text-right font-normal">Executed</th>
+              <th className="py-1 text-right font-normal">Rejected</th>
+            </tr>
+          </thead>
+          <tbody>
+            {m.tools.byTool.map((t) => (
+              <tr key={t.tool} className="border-t border-line">
+                <td className="py-1 font-mono">{t.tool}</td>
+                <td className="py-1 text-right font-mono">{t.executed}</td>
+                <td className="py-1 text-right font-mono text-danger/90">{t.rejected}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {m.tools.topRejections.length > 0 && (
+          <ul className="mt-2 space-y-1 text-xs text-dim">
+            {m.tools.topRejections.map((r) => (
+              <li key={r.reason}>
+                <span className="font-mono">{r.count}×</span> {r.reason}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <section aria-label="Time per graph node">
+        <h4 className="mb-2 font-display text-sm font-semibold">Average time per node (measured)</h4>
+        <ul className="space-y-1">
+          {m.nodes.map((n) => (
+            <li key={n.node} className="flex items-center gap-2 text-xs">
+              <span className="w-36 shrink-0">{NODE_LABEL[n.node] ?? n.node}</span>
+              <span className="h-1.5 rounded bg-cyan/60" style={{ width: `${Math.max(2, Math.min(100, ((n.avgMs ?? 0) / Math.max(1, m.nodes[0]?.avgMs ?? 1)) * 100))}%` }} aria-hidden="true" />
+              <span className="ml-auto font-mono text-dim">{ms(n.avgMs)}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+      <Stat label="Simulation" value={`${m.simulation.ticks} ticks`} hint={`${m.simulation.executed} actions · ${m.simulation.rejected} rejected · ${m.simulation.skipped} skipped`} />
+    </div>
+  );
+}
+
+export function CompareRuns({ a, b }: { a: RunDetail; b: RunDetail }) {
+  const nodes = [...new Set([...a.steps.map((s) => s.node), ...b.steps.map((s) => s.node)])];
+  const step = (r: RunDetail, node: string) => r.steps.find((s) => s.node === node);
+  const rows: [string, string, string][] = [
+    ["NPC", a.npc?.name ?? "–", b.npc?.name ?? "–"],
+    ["Model", `${a.provider}/${a.model}`, `${b.provider}/${b.model}`],
+    ["Status", a.status.toLowerCase(), b.status.toLowerCase()],
+    ["Latency", ms(a.latencyMs), ms(b.latencyMs)],
+    ["Tokens", `${a.inputTokens ?? 0}/${a.outputTokens ?? 0}`, `${b.inputTokens ?? 0}/${b.outputTokens ?? 0}`],
+    ["Tool calls", `${a.tools.total} (${a.tools.rejected} rejected)`, `${b.tools.total} (${b.tools.rejected} rejected)`],
+  ];
+  return (
+    <div className="space-y-3">
+      <table className="w-full text-left text-xs" aria-label="Run comparison">
+        <thead className="text-dim">
+          <tr>
+            <th className="py-1 font-normal" />
+            <th className="py-1 font-normal">Run {a.id.slice(-6)}</th>
+            <th className="py-1 font-normal">Run {b.id.slice(-6)}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([k, x, y]) => (
+            <tr key={k} className="border-t border-line">
+              <td className="py-1 text-dim">{k}</td>
+              <td className="py-1 font-mono">{x}</td>
+              <td className="py-1 font-mono">{y}</td>
+            </tr>
+          ))}
+          {nodes.map((n) => (
+            <tr key={n} className="border-t border-line align-top">
+              <td className="py-1 text-dim">{NODE_LABEL[n] ?? n}</td>
+              <td className="py-1">{step(a, n) ? <span className="font-mono">{ms(step(a, n)!.durationMs)}</span> : <span className="text-dim">skipped</span>}</td>
+              <td className="py-1">{step(b, n) ? <span className="font-mono">{ms(step(b, n)!.durationMs)}</span> : <span className="text-dim">skipped</span>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {[a, b].map((r) => (
+          <div key={r.id} className="rounded-md border border-line p-2 text-xs">
+            <p className="text-dim">Tools in run {r.id.slice(-6)}</p>
+            <ul className="mt-1 space-y-0.5">
+              {r.toolExecutions.length === 0 && <li className="text-dim">none</li>}
+              {r.toolExecutions.map((t) => (
+                <li key={t.id} className={t.status === "EXECUTED" ? "" : "text-danger/90"}>
+                  {t.status === "EXECUTED" ? "✓" : "✗"} {t.tool}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type Replay = { dryRun: true; note: string; comparisons: { tool: string; args: unknown; then: { status: string; reason: string | null }; now: { status: string; reason: string | null } }[] };
+
+export function ReplayButton({ sessionId, runId }: { sessionId: string; runId: string }) {
+  const [replay, setReplay] = useState<Replay | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <section aria-label="Policy replay">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          setError(null);
+          try {
+            setReplay((await api<{ replay: Replay }>(`/api/sessions/${sessionId}/runs/${runId}/replay`, { method: "POST", body: {} })).replay);
+          } catch (e) {
+            setError(e instanceof ApiError ? e.message : "Replay failed");
+          } finally {
+            setBusy(false);
+          }
+        }}
+        className="rounded-md border border-line px-3 py-1.5 text-xs transition-colors hover:border-cyan/60 disabled:opacity-50"
+      >
+        {busy ? "Replaying…" : "Replay policy (dry run)"}
+      </button>
+      {error && <p role="alert" className="mt-2 text-xs text-danger">{error}</p>}
+      {replay && (
+        <div className="mt-2 space-y-1 text-xs">
+          <p className="text-dim">{replay.note}</p>
+          {replay.comparisons.map((c, i) => (
+            <p key={i} className={c.then.status === c.now.status || (c.then.status === "executed" && c.now.status === "approved") ? "" : "text-amber"}>
+              <span className="font-mono">{c.tool}</span>: then {c.then.status}
+              {c.then.reason ? ` (${c.then.reason})` : ""} → now {c.now.status}
+              {c.now.reason ? ` (${c.now.reason})` : ""}
+            </p>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type SimulationInfo = {
+  paused: boolean;
+  tick: number;
+  everyTurns: number;
+  maxActionsPerTick: number;
+  ticks: { tick: number; trigger: string; durationMs: number; createdAt: string; actions: { intention: string; actor: string; title: string; status: string; reason?: string; outcomes: { status: string; text: string }[] }[] }[];
+};
+
+export function SimulationPanel({ sessionId, refreshKey, onView }: { sessionId: string; refreshKey: number; onView: (view: unknown) => void }) {
+  const [sim, setSim] = useState<SimulationInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    api<{ simulation: SimulationInfo }>(`/api/sessions/${sessionId}/simulation`, { signal: controller.signal })
+      .then((r) => setSim(r.simulation))
+      .catch((e) => !controller.signal.aborted && setError(e instanceof ApiError ? e.message : "Couldn't load the simulation"));
+    return () => controller.abort();
+  }, [sessionId, refreshKey]);
+
+  async function control(action: "pause" | "resume" | "step") {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api<{ simulation: SimulationInfo; view: unknown }>(`/api/sessions/${sessionId}/simulation`, {
+        method: "POST",
+        body: action === "step" ? { action, idempotencyKey: crypto.randomUUID() } : { action },
+      });
+      setSim(r.simulation);
+      onView(r.view);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "That didn't work");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!sim) return error ? <p role="alert" className="text-sm text-danger">{error}</p> : <div className="h-24 animate-pulse rounded-md border border-line bg-panel-2" />;
+  return (
+    <div className="space-y-3">
+      <p className="text-sm">
+        Tick <span className="font-mono">{sim.tick}</span> · every {sim.everyTurns} player turns · at most {sim.maxActionsPerTick} actions per tick ·{" "}
+        <span className={sim.paused ? "text-amber" : "text-cyan"}>{sim.paused ? "paused" : "running"}</span>
+      </p>
+      <div className="flex flex-wrap gap-2" aria-label="Simulation controls (development)">
+        <button type="button" disabled={busy} onClick={() => void control(sim.paused ? "resume" : "pause")} className="rounded-md border border-line px-3 py-1.5 text-xs hover:border-cyan/60 disabled:opacity-50">
+          {sim.paused ? "Resume" : "Pause"}
+        </button>
+        <button type="button" disabled={busy} onClick={() => void control("step")} className="rounded-md border border-line px-3 py-1.5 text-xs hover:border-cyan/60 disabled:opacity-50">
+          Step one tick
+        </button>
+      </div>
+      {error && <p role="alert" className="text-xs text-danger">{error}</p>}
+      {sim.ticks.length === 0 && <p className="py-6 text-center text-sm text-dim">The city hasn&apos;t moved yet. It acts every {sim.everyTurns} turns.</p>}
+      <ol className="space-y-2" aria-label="Simulation history">
+        {sim.ticks.map((t) => (
+          <li key={t.tick} className="rounded-md border border-line p-2.5 text-xs">
+            <p className="flex items-center gap-2">
+              <span className="font-mono">tick {t.tick}</span> <span className="text-dim">{t.trigger.toLowerCase()}</span>
+              <span className="ml-auto font-mono text-dim">{ms(t.durationMs)}</span>
+            </p>
+            {t.actions.length === 0 && <p className="mt-1 text-dim">No intention&apos;s conditions held.</p>}
+            <ul className="mt-1 space-y-1">
+              {t.actions.map((a, i) => (
+                <li key={i}>
+                  <span className={a.status === "executed" ? "text-cyan" : a.status === "rejected" ? "text-danger" : "text-dim"}>{a.status}</span> · <span className="font-mono">{a.actor}</span> · {a.title}
+                  {a.reason && <span className="block text-dim">{a.reason}</span>}
+                  {a.status === "executed" && <span className="block text-text/70">{a.outcomes.filter((o) => o.status === "applied").map((o) => o.text).join(" · ")}</span>}
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }

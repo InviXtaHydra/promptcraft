@@ -69,8 +69,13 @@ export function Hud({ view, ai, onOpenDebugger }: { view: GameView; ai: AiStatus
             <Coins className="size-4" aria-hidden="true" /> {view.world.credits}
           </motion.span>
           <AlertMeter level={view.world.alert} />
-          <span className="hidden items-center gap-1.5 font-mono text-xs text-dim lg:inline-flex" aria-label={`Turn ${view.session.turn}`}>
+          <span
+            className="hidden items-center gap-1.5 font-mono text-xs text-dim lg:inline-flex"
+            aria-label={`Turn ${view.session.turn}; the city moves in ${view.simulation.nextTickInTurns} turns`}
+            title={view.simulation.paused ? "The city simulation is paused" : `NPCs and factions act every ${view.simulation.everyTurns} turns`}
+          >
             <Gauge className="size-3.5" aria-hidden="true" /> T{view.session.turn}
+            <span className={view.simulation.paused ? "text-amber" : ""}>{view.simulation.paused ? "· city paused" : `· city in ${view.simulation.nextTickInTurns}`}</span>
           </span>
           <AiBadge ai={ai} />
           <button

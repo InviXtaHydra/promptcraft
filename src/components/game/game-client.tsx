@@ -13,6 +13,7 @@ import { AgentDebugger } from "./agent-debugger";
 import { ChatTerminal, type LiveTurnView } from "./chat-terminal";
 import { CityPanel } from "./city-panel";
 import { Hud } from "./hud";
+import { ChoiceDialog, EndingBanner } from "./case-board";
 import { EventFeed, Journal } from "./journal";
 import { useAuthRedirect } from "./use-auth-redirect";
 
@@ -21,7 +22,11 @@ export type Command =
   | { type: "travel"; locationKey: string }
   | { type: "investigate" }
   | { type: "give"; npcKey: string; itemKey: string }
-  | { type: "buy"; npcKey: string; itemKey: string };
+  | { type: "buy"; npcKey: string; itemKey: string }
+  | { type: "choose"; choiceKey: string; optionKey: string }
+  | { type: "save_hypothesis"; suspectKey: string; evidenceKeys: string[]; note?: string }
+  | { type: "discard_hypothesis"; hypothesisId: string }
+  | { type: "submit_case"; suspectKey: string; evidenceKeys: string[] };
 
 type Tab = "city" | "talk" | "journal";
 
@@ -116,6 +121,7 @@ export function GameClient() {
             if (event.type === "delta") setLive((l) => (l ? { ...l, reply: l.reply + event.text } : l));
             if (event.type === "outcome" && event.status === "applied") toast(event.text);
             if (event.type === "view") setView(event.view);
+            if (event.type === "simulation") for (const a of event.tick.actions) if (a.status === "executed" && a.actor !== "engine") toast(a.title, { description: "The city moves" });
             if (event.type === "error") failed = event.message;
           },
           controller.signal,
@@ -152,6 +158,7 @@ export function GameClient() {
         setView(res.view);
         setNarration(res.result.narration);
         for (const o of res.result.outcomes) if (o.status === "applied") toast(o.text);
+        for (const a of res.result.simulation?.actions ?? []) if (a.status === "executed" && a.actor !== "engine") toast(a.title, { description: "The city moves" });
         if (command.type === "give") setTab("talk");
         if (res.result.reactionError) toast.error(res.result.reactionError);
         setConversationVersion((n) => n + 1);
@@ -201,7 +208,11 @@ export function GameClient() {
   return (
     <div className="flex min-h-svh flex-col">
       <Hud view={view} ai={ai} onOpenDebugger={() => setDebuggerOpen(true)} />
-      <main className="mx-auto grid w-full max-w-[1500px] flex-1 gap-4 px-3 pt-4 pb-24 sm:px-5 lg:grid-cols-[320px_minmax(0,1fr)_360px] lg:pb-6">
+      <div className="px-3 pt-4 sm:px-5">
+        <EndingBanner view={view} />
+      </div>
+      <ChoiceDialog view={view} run={run} busy={busy} />
+      <main className="mx-auto grid w-full max-w-[1500px] flex-1 gap-4 px-3 pb-24 sm:px-5 lg:grid-cols-[320px_minmax(0,1fr)_360px] lg:pb-6">
         <div className={cn(tab === "city" ? "block" : "hidden", "lg:block")}>
           <CityPanel
             view={view}
@@ -228,12 +239,12 @@ export function GameClient() {
           />
         </div>
         <div className={cn(tab === "journal" ? "flex" : "hidden", "flex-col gap-4 lg:flex")}>
-          <Journal view={view} />
+          <Journal view={view} run={run} busy={busy} />
           <EventFeed view={view} />
         </div>
       </main>
 
-      <AgentDebugger open={debuggerOpen} onOpenChange={setDebuggerOpen} sessionId={sessionId} liveEvents={liveEvents} refreshKey={runsVersion} />
+      <AgentDebugger open={debuggerOpen} onOpenChange={setDebuggerOpen} sessionId={sessionId} liveEvents={liveEvents} refreshKey={runsVersion} onView={(v) => setView(v as GameView)} />
 
       {/* Mobile navigation */}
       <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-3 border-t border-line bg-ink/95 backdrop-blur lg:hidden" aria-label="Game sections">
