@@ -15,7 +15,7 @@ export const neonBabylon: z.input<typeof scenarioSchema> = {
   title: "Neon-Babylon 2099: Project Genesis",
   summary:
     "A missing courier, a stolen memory shard and a corporate tower that never sleeps. Follow the trail from the Neon Slums to the heart of Aether Dynamics.",
-  version: 1,
+  version: 2,
   startingCredits: 80,
   startingItems: [{ itemKey: "cracked-deck", quantity: 1 }],
 
@@ -163,7 +163,7 @@ export const neonBabylon: z.input<typeof scenarioSchema> = {
           "Kira in the Cyber-Bazaar can trace any signal for a price.",
         ],
         beliefs: ["Aether Dynamics is involved somehow.", "Juno would never sell him out."],
-        uncertainties: ["Whether Juno is still alive.", "What 'AE-GEN' on the shard means."],
+        uncertainties: ["Whether Juno is still alive.", "Why anyone would hunt a courier for an old memory-drive part."],
         secrets: [{ fact: "He helped design the first Aether memory-lattice, the seed of Project Genesis.", revealAtTrust: 60 }],
         trustThresholds: { shareCourierName: 15, vouchToKira: 30 },
         behavioralRules: [

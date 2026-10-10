@@ -19,7 +19,7 @@ describe("the deterministic test embedder", () => {
   const embedder = new HashEmbedder();
 
   it("is labelled simulated and produces 768 normalised dimensions, the same every time", async () => {
-    const [a, b] = await embedder.embed(["Juno's scorched badge", "Juno's scorched badge"], "document");
+    const [a, b] = await embedder.embed(["Juno's scorched badge", "Juno's scorched badge"]);
     expect(embedder.isSimulated).toBe(true);
     expect(a).toHaveLength(768);
     expect(a).toEqual(b);
@@ -27,7 +27,7 @@ describe("the deterministic test embedder", () => {
   });
 
   it("puts texts that share words closer together", async () => {
-    const [q, near, far] = await embedder.embed(["what about the scorched badge", "The player showed him Juno's scorched badge.", "Kira sells a signal decoder"], "query");
+    const [q, near, far] = await embedder.embed(["what about the scorched badge", "The player showed him Juno's scorched badge.", "Kira sells a signal decoder"]);
     expect(cosine(q, near)).toBeGreaterThan(cosine(q, far));
   });
 

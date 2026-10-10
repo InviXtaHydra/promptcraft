@@ -5,7 +5,6 @@ import type { TransactionClient } from "../prisma-client";
 import { applyEffects, type AppliedOutcome } from "./apply";
 import { npcsReachableFrom, objectiveId, type SessionContext } from "./context";
 import type { Effect } from "./effects";
-import { checkProposals } from "./policy";
 
 const key = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]*$/);
 

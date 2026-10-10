@@ -198,7 +198,7 @@ export async function runNpcTurn(deps: TurnDeps, input: TurnInput, options: { si
     .addNode("plan", async (s: State) =>
       trace.step("plan", async () => {
         checkCancelled();
-        const required = storyHooks(s.ctx, npc.key).required;
+        const required = storyHooks(s.ctx, npc.key, message).required;
         if (meter.total + 2_000 > config.AI_TURN_TOKEN_BUDGET) {
           return { value: { calls: required }, summary: `token budget (${meter.total} of ${config.AI_TURN_TOKEN_BUDGET} used); only story rules apply.`, skipped: true };
         }
@@ -215,7 +215,7 @@ export async function runNpcTurn(deps: TurnDeps, input: TurnInput, options: { si
     )
     .addNode("policy_check", async (s: State) =>
       trace.step("policy_check", async () => {
-        const calls = s.calls ?? storyHooks(s.ctx, npc.key).required;
+        const calls = s.calls ?? storyHooks(s.ctx, npc.key, message).required;
         const decisions = checkToolCalls(s.ctx, npc.key, calls, config.maxToolCalls);
         const lookedUp: ExecutedSummary["lookedUp"] = [];
         for (const d of decisions) {
@@ -235,7 +235,13 @@ export async function runNpcTurn(deps: TurnDeps, input: TurnInput, options: { si
         return {
           value: { calls, decisions, executed: { applied: [], rejected: [], lookedUp } },
           summary: `${ok} of ${decisions.length} calls allowed for ${npc.name}.`,
-          data: { decisions: decisions.map((d) => (d.status === "approved" ? { tool: d.tool, args: d.args, source: d.call.source, status: "approved" } : { tool: d.call.tool, source: d.call.source, status: "rejected", reason: d.reason })) },
+          data: {
+            decisions: decisions.map((d) =>
+              d.status === "approved"
+                ? { tool: d.tool, args: d.args, source: d.call.source, status: "approved", ...(d.normalized.length ? { normalized: d.normalized } : {}) }
+                : { tool: d.call.tool, args: d.call.args, source: d.call.source, status: "rejected", reason: d.reason },
+            ),
+          },
         };
       }),
     )
@@ -313,8 +319,11 @@ export async function runNpcTurn(deps: TurnDeps, input: TurnInput, options: { si
           ],
           lookedUp: s.executed?.lookedUp ?? [],
         };
+        // The reply must describe the world as it is now, after the engine ran
+        const after = await loadSessionContext(prisma, s.input.sessionId, s.input.userId);
+        const npcContext = await buildNpcContext(prisma, after, npc.key, message, s.memories);
         return {
-          value: { outcomes, turn, executed },
+          value: { outcomes, turn, executed, ctx: after, npcContext },
           summary: `${executed.applied.length} state changes committed in turn ${turn}.`,
           data: { changes: outcomes.map(summarize) },
         };
@@ -323,7 +332,7 @@ export async function runNpcTurn(deps: TurnDeps, input: TurnInput, options: { si
     .addNode("respond", async (s: State) =>
       trace.step("respond", async () => {
         checkCancelled();
-        const r = await brain.respond(s.npcContext, s.executed, signal, (text) => emit({ type: "delta", text }));
+        const r = await brain.respond(s.npcContext, s.interpretation, s.executed, signal, (text) => emit({ type: "delta", text }));
         meter.add(r);
         const saved = await prisma.message.create({
           data: { conversationId, role: "NPC", content: r.value, provider: brain.provider, isSimulated: brain.isSimulated, agentRunId: runId },
@@ -354,7 +363,7 @@ export async function runNpcTurn(deps: TurnDeps, input: TurnInput, options: { si
     // Conditional routing: ordinary conversation skips planning and policy entirely
     .addConditionalEdges(
       "interpret",
-      (s: State) => (s.interpretation.needsAction ? "plan" : storyHooks(s.ctx, npc.key).required.length ? "policy_check" : "execute"),
+      (s: State) => (s.interpretation.needsAction ? "plan" : storyHooks(s.ctx, npc.key, message).required.length ? "policy_check" : "execute"),
       ["plan", "policy_check", "execute"],
     )
     .addEdge("plan", "policy_check")

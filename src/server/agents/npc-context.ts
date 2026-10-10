@@ -53,16 +53,18 @@ export async function buildNpcContext(
   for (const quest of ctx.content.quests.values()) {
     const status = ctx.state.questStatus.get(quest.key);
     if (!status || (quest.giver?.key !== npc.key && !quest.objectives.some((o) => o.recipientKey === npc.key || o.targetKey === npc.key))) continue;
-    const open = quest.objectives.filter((o) => !ctx.state.objectivesDone.has(objectiveId(quest.key, o.key))).map((o) => o.description);
-    facts.push(`Job "${quest.title}": ${status === "COMPLETED" ? "done" : `in progress; still open: ${open.join(" ") || "nothing"}`}`);
+    const open = quest.objectives.filter((o) => !ctx.state.objectivesDone.has(objectiveId(quest.key, o.key))).map((o) => `${o.description} [objectiveKey: ${o.key}]`);
+    facts.push(`Job "${quest.title}" [questKey: ${quest.key}]: ${status === "COMPLETED" ? "done" : `in progress; still open: ${open.join(" ") || "nothing"}`}`);
   }
-  const shown = [...ctx.state.evidence].map((k) => ctx.content.evidence.get(k)!).filter((e) => e.tags.some((t) => ["juno", "courier", "genesis", "aether", "shard", "bazaar"].includes(t)));
-  if (shown.length) facts.push(`Evidence the player has: ${shown.map((e) => `${e.title} (${e.description})`).join(" | ")}`);
+  const carried = [...ctx.state.inventory.keys()].map((k) => `${ctx.content.items.get(k)!.name} [itemKey: ${k}]`);
+  facts.push(`The player carries: ${carried.join(", ") || "nothing of note"}. They have nothing else.`);
+  const evidence = [...ctx.state.evidence].map((k) => ctx.content.evidence.get(k)!);
+  facts.push(evidence.length ? `Evidence the player has found: ${evidence.map((e) => `${e.title} [evidenceKey: ${e.key}] (${e.description})`).join(" | ")}` : "The player hasn't found any evidence yet.");
   if (offers.size) facts.push(`You sell: ${[...offers.values()].map((o) => `${o.name} for ${o.price} credits${o.discounted ? " (friend price)" : ""}`).join(", ")}. The player pays at your stall, not through conversation.`);
   const limit = persona.trustThresholds.refuseTradeAtAlert;
   if (limit !== undefined && ctx.state.alert >= limit) facts.push(`The security alert is ${ctx.state.alert}: you refuse to trade until it drops.`);
 
-  const hooks = storyHooks(ctx, npc.key);
+  const hooks = storyHooks(ctx, npc.key, message);
   return {
     npc: { key: npc.key, name: npc.name, title: npc.title, persona, faction: npc.faction?.name ?? null },
     dialogue,

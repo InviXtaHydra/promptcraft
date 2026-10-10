@@ -46,3 +46,14 @@ describe("NPC tool calls", () => {
     expect(verdicts("kira", [call("update_quest", { action: "start", questKey: "ghost-courier" })], ctx)[0]).toMatch(/^policy: /);
   });
 });
+
+describe("key normalisation", () => {
+  it("maps an exact title from this scenario to its key and leaves anything else to validation", () => {
+    const [ok] = checkToolCalls(fakeContext(), "balthazar", [call("update_quest", { action: "start", questKey: "The Ghost Courier" })], 6);
+    expect(ok).toMatchObject({ status: "approved", args: { questKey: "ghost-courier" }, normalized: ['questKey: "The Ghost Courier" → ghost-courier'] });
+    const [obj] = checkToolCalls(fakeContext(), "balthazar", [call("update_quest", { action: "complete_objective", questKey: "ghost-courier", objectiveKey: "ask_about_badge" })], 6);
+    expect(obj).toMatchObject({ status: "approved", args: { objectiveKey: "ask-about-badge" } });
+    expect(verdicts("balthazar", [call("update_quest", { action: "start", questKey: "Some Other Quest" })])[0]).toMatch(/^invalid arguments/);
+    expect(verdicts("balthazar", [call("inspect_evidence", { evidenceKey: "Scorched Courier Badge" })])).toEqual(["ok"]);
+  });
+});

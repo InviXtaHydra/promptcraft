@@ -94,7 +94,7 @@ describe("the opening scenario, played through the engine", () => {
     const result = await run({ type: "talk", npcKey: "balthazar", message: "Need a hand?" });
     const agentRun = await testPrisma.agentRun.findUniqueOrThrow({
       where: { id: result.agentRunId },
-      include: { steps: { orderBy: { index: "asc" } }, tools: true, messages: true },
+      include: { steps: { orderBy: { index: "asc" } }, tools: true, messages: { orderBy: { createdAt: "asc" } } },
     });
     expect(agentRun).toMatchObject({ gameSessionId: session.id, provider: "mock", isSimulated: true, status: "SUCCEEDED" });
     expect(agentRun.steps.map((s) => s.node)).toEqual([

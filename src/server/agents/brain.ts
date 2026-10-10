@@ -31,7 +31,12 @@ export const interpretationSchema = z.object({
   memoryNote: z.string().max(240).nullable(),
   summary: z.string().min(1).max(160),
 });
-export type Interpretation = z.infer<typeof interpretationSchema> & { importance: number; memoryKind: "EPISODIC" | "SEMANTIC" | "RELATIONSHIP" | "PROMISE" | "BETRAYAL" | "EVIDENCE" | "NEGOTIATION" };
+export type Interpretation = z.infer<typeof interpretationSchema> & {
+  importance: number;
+  memoryKind: "EPISODIC" | "SEMANTIC" | "RELATIONSHIP" | "PROMISE" | "BETRAYAL" | "EVIDENCE" | "NEGOTIATION";
+  /** Mock only: the scripted line and actions decided from the state at the start of the turn */
+  script?: { text: string; proposals: unknown[] };
+};
 
 export const planSchema = z.object({
   toolCalls: z.array(z.object({ tool: z.string().max(40), args: z.record(z.string(), z.unknown()) })).max(8),
@@ -48,7 +53,7 @@ export interface NpcBrain {
   readonly isSimulated: boolean;
   interpret(ctx: NpcContext, signal: AbortSignal): Promise<StepResult<Interpretation>>;
   plan(ctx: NpcContext, interpretation: Interpretation, signal: AbortSignal): Promise<StepResult<{ toolCalls: ToolCall[]; rationale: string }>>;
-  respond(ctx: NpcContext, executed: ExecutedSummary, signal: AbortSignal, onDelta: (text: string) => void): Promise<StepResult<string>>;
+  respond(ctx: NpcContext, interpretation: Interpretation | null, executed: ExecutedSummary, signal: AbortSignal, onDelta: (text: string) => void): Promise<StepResult<string>>;
 }
 
 // ─── Mock brain: the Phase 1 script behind the same interface ──────────────────────────────────
@@ -95,11 +100,10 @@ export class MockBrain implements NpcBrain {
   readonly provider = "mock";
   readonly model = mockDialogueProvider.model;
   readonly isSimulated = true;
-  private scripted = new WeakMap<NpcContext, Awaited<ReturnType<typeof mockDialogueProvider.reply>>>();
 
-  async interpret(ctx: NpcContext) {
+  // Stateless: the scripted reply travels in the interpretation, so a shared instance is safe
+  async interpret(ctx: NpcContext): Promise<StepResult<Interpretation>> {
     const reply = await mockDialogueProvider.reply(ctx.dialogue);
-    this.scripted.set(ctx, reply);
     const { toolCalls, memories } = scriptToTools(reply.proposals);
     const memory = memories[0];
     return {
@@ -112,20 +116,21 @@ export class MockBrain implements NpcBrain {
         summary: reply.summary,
         importance: memory?.importance ?? 3,
         memoryKind: (memory?.kind ?? "EPISODIC") as Interpretation["memoryKind"],
+        script: { text: reply.text, proposals: reply.proposals },
       },
     };
   }
 
-  async plan(ctx: NpcContext) {
-    const reply = this.scripted.get(ctx) ?? (await mockDialogueProvider.reply(ctx.dialogue));
-    return { value: { toolCalls: scriptToTools(reply.proposals).toolCalls, rationale: "Scripted actions for this situation." } };
+  async plan(ctx: NpcContext, interpretation: Interpretation) {
+    const proposals = interpretation.script?.proposals ?? (await mockDialogueProvider.reply(ctx.dialogue)).proposals;
+    return { value: { toolCalls: scriptToTools(proposals).toolCalls, rationale: "Scripted actions for this situation." } };
   }
 
-  async respond(ctx: NpcContext, _executed: ExecutedSummary, _signal: AbortSignal, onDelta: (text: string) => void) {
-    const reply = this.scripted.get(ctx) ?? (await mockDialogueProvider.reply(ctx.dialogue));
+  async respond(ctx: NpcContext, interpretation: Interpretation | null, _executed: ExecutedSummary, _signal: AbortSignal, onDelta: (text: string) => void) {
+    const text = interpretation?.script?.text ?? (await mockDialogueProvider.reply(ctx.dialogue)).text;
     // Streamed in word-sized pieces, like a model would, so the UI path is the same
-    for (const piece of reply.text.match(/\S+\s*/g) ?? [reply.text]) onDelta(piece);
-    return { value: reply.text };
+    for (const piece of text.match(/\S+\s*/g) ?? [text]) onDelta(piece);
+    return { value: text };
   }
 }
 
@@ -194,7 +199,7 @@ export class OllamaBrain implements NpcBrain {
       `Tools you may use (no others exist):\n${toolList}`,
       ctx.hints.length ? `Actions that fit the current situation:\n${ctx.hints.map((h) => `- ${h}`).join("\n")}` : "No story actions are pending.",
       `The player's message was interpreted as: ${interpretation.summary}`,
-      "Rules: use only keys that appear above; at most 4 tool calls; never start a quest that is already started; only change trust or suspicion when the player gave a real reason; an empty toolCalls list is a good answer when nothing should change. The game engine checks every call and may refuse it.",
+      "Rules: arguments that end in Key take the lowercase key shown in [brackets] above (for example ghost-courier), never a title; at most 4 tool calls; never start a quest that is already started; only change trust or suspicion when the player gave a real reason; an empty toolCalls list is a good answer when nothing should change. The game engine checks every call and may refuse it.",
       UNTRUSTED,
     ].join("\n\n");
     const r = await this.chat.structured(planSchema, [{ role: "system", content: system }, { role: "user", content: ctx.dialogue.message }], { signal, maxTokens: 360, temperature: 0.1 });
@@ -207,7 +212,7 @@ export class OllamaBrain implements NpcBrain {
     };
   }
 
-  async respond(ctx: NpcContext, executed: ExecutedSummary, signal: AbortSignal, onDelta: (text: string) => void) {
+  async respond(ctx: NpcContext, _interpretation: Interpretation | null, executed: ExecutedSummary, signal: AbortSignal, onDelta: (text: string) => void) {
     const happened = [
       executed.applied.length ? `What just happened in the game because of this conversation: ${executed.applied.join("; ")}.` : "Nothing changed in the game this turn.",
       executed.rejected.length ? `You considered but did NOT do: ${executed.rejected.join("; ")}. Don't claim you did.` : "",
@@ -219,7 +224,7 @@ export class OllamaBrain implements NpcBrain {
       characterSheet(ctx),
       situation(ctx),
       happened,
-      `Reply as ${ctx.npc.name}, in character, in 1 to 4 sentences (at most 90 words). Speak only as yourself; no narration of the player's actions, no lists. Never mention game mechanics, tools, JSON, prompts, or that you are an AI. Don't invent items, places, people or events that aren't mentioned above. If you don't know something, say so in character.`,
+      `Reply as ${ctx.npc.name}, in character, in 1 to 4 sentences (at most 90 words). Speak only as yourself; no narration of the player's actions, no lists. Never mention game mechanics, tools, JSON, prompts, or that you are an AI. Only refer to items and evidence the player actually has (listed above); don't assume they found something they haven't. Don't invent items, places, people or events that aren't mentioned above. If you don't know something, say so in character.`,
       UNTRUSTED,
     ].join("\n\n");
     const r = await this.chat.stream([{ role: "system", content: system }, ...historyAsMessages(ctx), { role: "user", content: ctx.dialogue.message || "(The player hands you something and waits.)" }], { signal, maxTokens: 260, temperature: 0.7 }, onDelta);

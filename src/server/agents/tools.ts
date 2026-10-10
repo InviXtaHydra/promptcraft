@@ -54,8 +54,42 @@ export const READ_TOOLS: ReadonlySet<ToolName> = new Set(["get_inventory", "insp
 
 export type ToolCall = { tool: string; args: unknown; /** "model", "script" (mock) or "story-rule" */ source: string };
 
+const KEY_FIELDS = { questKey: "quests", evidenceKey: "evidence", itemKey: "items", locationKey: "locations" } as const;
+const isKey = (v: unknown) => typeof v === "string" && /^[a-z0-9][a-z0-9-]*$/.test(v);
+const loose = (v: string) => v.toLowerCase().replace(/^the\s+/, "").replace(/[^a-z0-9]+/g, " ").trim();
+
+/**
+ * Small models sometimes name things by title ("The Ghost Courier") instead of key. Exact titles or
+ * names from this scenario are mapped to their key; anything else is left alone and fails
+ * validation. Objective keys are matched against the objective's key with "_" read as "-".
+ * Returns the arguments to validate and which fields were normalised (shown in the trace).
+ */
+export function normalizeKeys(ctx: SessionContext, args: unknown): { args: unknown; normalized: string[] } {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return { args, normalized: [] };
+  const out: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+  const normalized: string[] = [];
+  const content = ctx.content as unknown as Record<string, Map<string, { key: string; title?: string; name?: string }> | undefined>;
+  for (const [field, collection] of Object.entries(KEY_FIELDS)) {
+    const value = out[field];
+    if (typeof value !== "string" || isKey(value)) continue;
+    const match = [...(content[collection]?.values() ?? [])].find((x) => loose(x.title ?? x.name ?? "") === loose(value));
+    if (match) {
+      out[field] = match.key;
+      normalized.push(`${field}: "${value}" → ${match.key}`);
+    }
+  }
+  if (typeof out.objectiveKey === "string" && !isKey(out.objectiveKey)) {
+    const candidate = out.objectiveKey.toLowerCase().replace(/_/g, "-");
+    if (isKey(candidate)) {
+      normalized.push(`objectiveKey: "${out.objectiveKey}" → ${candidate}`);
+      out.objectiveKey = candidate;
+    }
+  }
+  return { args: out, normalized };
+}
+
 export type ToolDecision =
-  | { call: ToolCall; status: "approved"; tool: ToolName; args: unknown; effects: Effect[]; read: boolean }
+  | { call: ToolCall; status: "approved"; tool: ToolName; args: unknown; effects: Effect[]; read: boolean; normalized: string[] }
   | { call: ToolCall; status: "rejected"; reason: string };
 
 /** Translates validated write-tool arguments into engine effects. The speaking NPC is always the subject. */
@@ -122,14 +156,15 @@ export function checkToolCalls(ctx: SessionContext, npcKey: string, calls: ToolC
     if (!(TOOL_NAMES as readonly string[]).includes(call.tool)) return { call, status: "rejected", reason: `unknown tool "${String(call.tool).slice(0, 40)}"` };
     const tool = call.tool as ToolName;
     if (!npc.allowedTools.includes(tool)) return { call, status: "rejected", reason: `${npc.name} is not permitted to use ${tool}` };
-    const parsed = toolArgs[tool].safeParse(call.args ?? {});
+    const { args: candidate, normalized } = normalizeKeys(ctx, call.args ?? {});
+    const parsed = toolArgs[tool].safeParse(candidate);
     if (!parsed.success) return { call, status: "rejected", reason: `invalid arguments: ${parsed.error.issues[0]?.message ?? "invalid"}` };
     const signature = `${tool}:${stable(parsed.data)}`;
     if (seen.has(signature)) return { call, status: "rejected", reason: "duplicate of an earlier call in this turn" };
     seen.add(signature);
     if (++counted > maxToolCalls) return { call, status: "rejected", reason: `more than ${maxToolCalls} tool calls in one turn` };
 
-    if (READ_TOOLS.has(tool)) return { call, status: "approved", tool, args: parsed.data, effects: [], read: true };
+    if (READ_TOOLS.has(tool)) return { call, status: "approved", tool, args: parsed.data, effects: [], read: true, normalized };
     const effects = effectsFor(tool, parsed.data as never, ctx, npc.key);
     if (effects.length === 0) return { call, status: "rejected", reason: "this tool has no effect for this NPC" };
     const verdicts = checkProposals(ctx, npc.key, effects);
@@ -146,6 +181,6 @@ export function checkToolCalls(ctx: SessionContext, npcKey: string, calls: ToolC
       if (e.type === "alert") totals.alert += e.delta;
       if (e.type === "trust" || e.type === "suspicion") totals[e.type] += e.delta;
     }
-    return { call, status: "approved", tool, args: parsed.data, effects: approved, read: false };
+    return { call, status: "approved", tool, args: parsed.data, effects: approved, read: false, normalized };
   });
 }

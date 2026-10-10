@@ -21,7 +21,7 @@ class ScriptedTestBrain extends MockBrain {
     const r = await super.interpret(ctx);
     return { value: { ...r.value, needsAction: true } };
   }
-  override async plan() {
+  override async plan(): Promise<{ value: { toolCalls: { tool: string; args: unknown; source: string }[]; rationale: string } }> {
     return { value: { toolCalls: this.calls.map((c) => ({ ...c, source: "model" })), rationale: "test" } };
   }
 }
@@ -61,6 +61,9 @@ describe("the NPC turn graph", () => {
     const deltas = events.filter((e) => e.type === "delta").map((e) => (e as { text: string }).text);
     expect(deltas.length).toBeGreaterThan(5);
     expect(deltas.join("")).toBe(r.reply);
+    // Regression: the reply belongs to the state at the start of the turn (the job offer), not to
+    // the state after the engine started the quest
+    expect(r.reply).toMatch(/My courier, Juno/);
     expect(events.some((e) => e.type === "tool" && e.status === "executed" && e.tool === "update_quest")).toBe(true);
     expect(events.findIndex((e) => e.type === "node" && e.node === "execute")).toBeLessThan(events.findIndex((e) => e.type === "delta"));
   });
@@ -224,5 +227,24 @@ describe("agent traces belong to their player", () => {
     await expect(getRun(testPrisma, owner.session.id, other.user.id, r.runId)).rejects.toSatisfy(isGameError("not_found"));
     // A run id from another session doesn't open through your own session either
     await expect(getRun(testPrisma, other.session.id, other.user.id, r.runId)).rejects.toSatisfy(isGameError("not_found"));
+  });
+});
+
+describe("story rules", () => {
+  it("completes 'ask about the badge' when the player holds it and brings it up, even if the model proposes nothing", async () => {
+    const quiet = new (class extends MockBrain {
+      override async interpret(ctx: NpcContext) {
+        const r = await super.interpret(ctx);
+        return { value: { ...r.value, needsAction: false, script: r.value.script ? { ...r.value.script, proposals: [] } : undefined } };
+      }
+    })();
+    const { user, session, talk, run } = await newGame({ brain: quiet });
+    await talk("balthazar", "hello");
+    await run({ type: "investigate" });
+    const r = await talk("balthazar", "What do you make of these badges?");
+    const v = await buildGameView(testPrisma, session.id, user.id, "t");
+    expect(v.quests[0].objectives.find((o) => o.key === "ask-about-badge")?.done).toBe(true);
+    const tool = await testPrisma.toolExecution.findFirstOrThrow({ where: { runId: r.runId, toolName: "update_quest" } });
+    expect(tool.status).toBe("EXECUTED");
   });
 });
