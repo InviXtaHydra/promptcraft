@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { mockDialogueProvider } from "@/server/dialogue/mock";
 import { buildGameView, getConversation } from "@/server/engine/view";
 import { newGame, testPrisma } from "../support/factories";
 
@@ -84,7 +83,7 @@ describe("the opening scenario, played through the engine", () => {
     expect(v.evidence.map((e) => e.key)).toContain("transit-record");
     expect(v.events.map((e) => e.title)).toEqual(expect.arrayContaining(["The signal points to Aether Tower", "Word travels in the Slums", "Investigation opened"]));
 
-    const chat = await getConversation(testPrisma, session.id, user.id, "kira", mockDialogueProvider);
+    const chat = await getConversation(testPrisma, session.id, user.id, "kira", { id: "mock", model: "deterministic-script-v1", isSimulated: true });
     expect(chat.messages.map((m) => m.role)).toEqual(["PLAYER", "NPC"]);
     expect(chat.messages[1]).toMatchObject({ isSimulated: true });
     expect(chat.messages[1].content).toMatch(/friend price/);
@@ -98,14 +97,23 @@ describe("the opening scenario, played through the engine", () => {
       include: { steps: { orderBy: { index: "asc" } }, tools: true, messages: true },
     });
     expect(agentRun).toMatchObject({ gameSessionId: session.id, provider: "mock", isSimulated: true, status: "SUCCEEDED" });
-    expect(agentRun.steps.map((s) => s.node)).toEqual(["validate_request", "load_state", "retrieve_memories", "interpret", "policy_check", "execute", "respond"]);
-    expect(agentRun.tools.map((t) => [t.toolName, t.status])).toEqual(
-      expect.arrayContaining([
-        ["quest_start", "EXECUTED"],
-        ["memory", "EXECUTED"],
-      ]),
-    );
-    expect(agentRun.messages).toHaveLength(1);
-    expect(agentRun.messages[0].isSimulated).toBe(true);
+    expect(agentRun.steps.map((s) => s.node)).toEqual([
+      "validate_request",
+      "load_state",
+      "build_npc_context",
+      "retrieve_memories",
+      "interpret",
+      "plan",
+      "policy_check",
+      "execute",
+      "respond",
+      "consolidate_memory",
+      "finalize",
+    ]);
+    expect(agentRun.tools.map((t) => [t.toolName, t.status])).toEqual([["update_quest", "EXECUTED"]]);
+    expect(agentRun.messages.map((m) => [m.role, m.isSimulated])).toEqual([
+      ["PLAYER", false],
+      ["NPC", true],
+    ]);
   });
 });

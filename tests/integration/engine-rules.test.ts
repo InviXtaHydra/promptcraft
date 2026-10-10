@@ -65,10 +65,11 @@ describe("the engine validates every command against the server-side state", () 
 
   it("rejects malformed commands and unknown keys", async () => {
     const { run, user, session } = await newGame();
-    const raw = (command: unknown) => executeCommand(testPrisma, { userId: user.id, sessionId: session.id, command, idempotencyKey: randomUUID(), provider: mockDialogueProvider });
+    const raw = (command: unknown) => executeCommand(testPrisma, { userId: user.id, sessionId: session.id, command, idempotencyKey: randomUUID(), reactions: mockDialogueProvider });
     await expectRejected(raw({ type: "teleport", locationKey: "aether-tower" }), "invalid_command");
-    await expectRejected(raw({ type: "talk", npcKey: "balthazar", message: "" }), "invalid_command");
-    await expectRejected(raw({ type: "talk", npcKey: "balthazar", message: "x".repeat(501) }), "invalid_command");
+    await expectRejected(raw({ type: "talk", npcKey: "balthazar", message: "hi" }), "invalid_command"); // talking goes through the agent graph
+    await expectRejected(run({ type: "talk", npcKey: "balthazar", message: "" }), "invalid_input");
+    await expectRejected(run({ type: "talk", npcKey: "balthazar", message: "x".repeat(501) }), "invalid_input");
     await expectRejected(raw({ type: "travel", locationKey: "../../etc" }), "invalid_command");
     await expectRejected(run({ type: "talk", npcKey: "kira", message: "hi" }), "npc_not_here");
     await expectRejected(run({ type: "give", npcKey: "balthazar", itemKey: "encrypted-shard" }), "not_owned");
@@ -97,7 +98,7 @@ describe("the engine validates every command against the server-side state", () 
     expect(v.npcsHere.find((n) => n.key === "kira")?.offers[0].refused).toBe(true);
     await expectRejected(run({ type: "buy", npcKey: "kira", itemKey: "signal-decoder" }), "trade_refused");
     // The sixth and seventh alert proposals were bounded by the engine, and that is in the trace
-    const skipped = await testPrisma.toolExecution.findMany({ where: { run: { gameSessionId: session.id }, toolName: "alert", status: "REJECTED" } });
+    const skipped = await testPrisma.toolExecution.findMany({ where: { run: { gameSessionId: session.id }, toolName: "trigger_security_alert", status: "REJECTED" } });
     expect(skipped.map((t) => t.rejectionReason)).toEqual(["engine: security alert is already at maximum", "engine: security alert is already at maximum"]);
   });
 });
@@ -109,9 +110,9 @@ describe("players can only reach their own save games", () => {
     const intruder = await makePlayer();
 
     await expectRejected(buildGameView(testPrisma, owner.session.id, intruder.id, "x"), "not_found");
-    await expectRejected(getConversation(testPrisma, owner.session.id, intruder.id, "balthazar", mockDialogueProvider), "not_found");
+    await expectRejected(getConversation(testPrisma, owner.session.id, intruder.id, "balthazar", { id: "mock", model: "m", isSimulated: true }), "not_found");
     await expectRejected(
-      executeCommand(testPrisma, { userId: intruder.id, sessionId: owner.session.id, command: { type: "investigate" }, idempotencyKey: randomUUID(), provider: mockDialogueProvider }),
+      executeCommand(testPrisma, { userId: intruder.id, sessionId: owner.session.id, command: { type: "investigate" }, idempotencyKey: randomUUID(), reactions: mockDialogueProvider }),
       "not_found",
     );
     // Nothing happened to the owner's game

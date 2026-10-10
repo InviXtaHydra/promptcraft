@@ -1,24 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { neonBabylon } from "@/content/neon-babylon";
 import { scenarioSchema, validateScenarioReferences } from "@/content/scenario-schema";
-import type { SessionContext } from "@/server/engine/context";
 import { BOUNDS, clamp, effectSchema } from "@/server/engine/effects";
 import { checkProposals } from "@/server/engine/policy";
+import { fakeContext } from "../support/fake-context";
 
 const scenario = scenarioSchema.parse(neonBabylon);
-
-/** Just enough of a session context for the policy, built from the real scenario content. */
-function fakeContext(): SessionContext {
-  const npcs = new Map(
-    scenario.npcs.map((n) => [n.key, { ...n, id: `npc-${n.key}`, factionId: n.factionKey ? `faction-${n.factionKey}` : null }]),
-  );
-  const quests = new Map(
-    scenario.quests.map((q) => [q.key, { ...q, giver: q.giverNpcKey ? { key: q.giverNpcKey } : null, objectives: q.objectives }]),
-  );
-  const evidence = new Map(scenario.evidence.map((e) => [e.key, { ...e, sourceNpcId: e.sourceNpcKey ? `npc-${e.sourceNpcKey}` : null }]));
-  const factions = new Map(scenario.factions.map((f) => [f.key, { ...f, id: `faction-${f.key}` }]));
-  return { sessionId: "s", userId: "u", content: { npcs, quests, evidence, factions }, state: {} } as unknown as SessionContext;
-}
 
 describe("the NPC policy", () => {
   const ctx = fakeContext();
