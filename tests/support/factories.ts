@@ -5,7 +5,8 @@ import { MockBrain, type NpcBrain } from "../../src/server/agents/brain";
 import { runNpcTurn, type TurnDeps } from "../../src/server/agents/npc-turn";
 import type { TurnEvent } from "../../src/server/agents/trace";
 import { mockDialogueProvider } from "../../src/server/dialogue/mock";
-import { executeCommand, type Command } from "../../src/server/engine";
+import type { z } from "zod";
+import { commandSchema, executeCommand } from "../../src/server/engine";
 import { createGameSession } from "../../src/server/engine/sessions";
 import { createPrismaClient, type PrismaClient } from "../../src/server/prisma-client";
 import { testDatabaseUrl } from "./test-database";
@@ -33,7 +34,7 @@ export async function makePlayer(prisma = testPrisma) {
   });
 }
 
-export type TestCommand = Command | { type: "talk"; npcKey: string; message: string };
+export type TestCommand = z.input<typeof commandSchema> | { type: "talk"; npcKey: string; message: string };
 
 export async function newGame(options: { userId?: string; brain?: NpcBrain } = {}) {
   const user = options.userId ? await testPrisma.user.findUniqueOrThrow({ where: { id: options.userId }, include: { profile: true } }) : await makePlayer();

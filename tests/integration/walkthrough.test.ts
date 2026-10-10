@@ -79,7 +79,8 @@ describe("the opening scenario, played through the engine", () => {
     // 6. Everything is in the database: a fresh view after the fact shows the same save game
     v = await view();
     expect(v.world.credits).toBe(230 - 95 + 60);
-    expect(v.quests.every((q) => q.status === "COMPLETED")).toBe(true);
+    expect(v.quests.filter((q) => q.status === "COMPLETED").map((q) => q.key).sort()).toEqual(["follow-the-signal", "ghost-courier"]);
+    expect(v.quests.find((q) => q.key === "project-genesis")?.status).toBe("ACTIVE"); // the next chapter
     expect(v.evidence.map((e) => e.key)).toContain("transit-record");
     expect(v.events.map((e) => e.title)).toEqual(expect.arrayContaining(["The signal points to Aether Tower", "Word travels in the Slums", "Investigation opened"]));
 
