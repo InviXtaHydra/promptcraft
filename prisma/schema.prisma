@@ -71,6 +71,8 @@ enum ScenarioVersionStatus {
   DRAFT
   PUBLISHED
   ARCHIVED
+  /// Materialised from a Creator Mode draft for an isolated test run; never offered to players
+  PREVIEW
 }
 
 model Scenario {
@@ -89,32 +91,43 @@ model Scenario {
 /// An immutable snapshot of a scenario. Game sessions pin the version they started on, so editing a
 /// scenario later (Creator Mode, Phase 3) never changes a running save game.
 model ScenarioVersion {
-  id              String                @id @default(cuid())
-  scenarioId      String
-  version         Int
-  status          ScenarioVersionStatus @default(DRAFT)
-  publishedAt     DateTime?
+  id                   String                @id @default(cuid())
+  scenarioId           String
+  version              Int
+  status               ScenarioVersionStatus @default(DRAFT)
+  publishedAt          DateTime?
   /// Starting state of every new save game on this version
-  startingCredits Int                   @default(0)
+  startingCredits      Int                   @default(0)
   /// [{ itemKey, quantity }]
-  startingItems   Json                  @default("[]")
-  createdAt       DateTime              @default(now())
+  startingItems        Json                  @default("[]")
+  /// The full scenario definition (src/content/scenario-schema.ts) this version was built from;
+  /// Creator Mode edits drafts here and materialises them for previews and publishing
+  definition           Json?
+  /// Simulation: a city tick after every N player turns, with at most M autonomous actions
+  simulationEveryTurns Int                   @default(3)
+  simulationMaxActions Int                   @default(2)
+  createdAt            DateTime              @default(now())
 
-  scenario     Scenario         @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
-  locations    Location[]
-  factions     Faction[]
-  npcs         NPC[]
-  items        ItemDefinition[]
-  quests       Quest[]
-  evidence     Evidence[]
-  gameSessions GameSession[]
+  scenario      Scenario         @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  locations     Location[]
+  factions      Faction[]
+  npcs          NPC[]
+  items         ItemDefinition[]
+  quests        Quest[]
+  evidence      Evidence[]
+  gameSessions  GameSession[]
+  suspects      Suspect[]
+  evidenceLinks EvidenceLink[]
+  endings       Ending[]
+  choices       Choice[]
+  intentions    NpcIntention[]
 
   @@unique([scenarioId, version])
   @@index([scenarioId, status])
 }
 
 model Location {
-  id                String  @id @default(cuid())
+  id                String   @id @default(cuid())
   scenarioVersionId String
   key               String
   name              String
@@ -123,11 +136,13 @@ model Location {
   ambience          String
   /// Accent colour for the location art (hex)
   accent            String
-  sortOrder         Int     @default(0)
-  isStartingPoint   Boolean @default(false)
+  sortOrder         Int      @default(0)
+  isStartingPoint   Boolean  @default(false)
   /// Locked locations need a LocationAccess row for the session before the player can travel there
-  startsUnlocked    Boolean @default(false)
+  startsUnlocked    Boolean  @default(false)
   lockedReason      String?
+  /// Holding any of these items grants access (several routes keep the story solvable)
+  unlockItemKeys    String[] @default([])
 
   scenarioVersion ScenarioVersion  @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
   npcs            NPC[]
@@ -262,6 +277,10 @@ enum ObjectiveKind {
   COLLECT_ITEM
   DELIVER_ITEM
   ASK_ABOUT
+  /// The NPC in targetKey trusts the player at least `threshold`
+  TRUST_AT_LEAST
+  /// Completed when the player submits a case file (the investigation's conclusion)
+  CLOSE_CASE
 }
 
 model Quest {
@@ -301,6 +320,8 @@ model QuestObjective {
   targetKey         String
   /// For DELIVER_ITEM: the NPC that receives the item
   recipientKey      String?
+  /// For TRUST_AT_LEAST
+  threshold         Int?
   optional          Boolean       @default(false)
   sortOrder         Int           @default(0)
   /// Engine effects applied once when this objective is completed
@@ -356,6 +377,11 @@ model GameSession {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
   lastPlayedAt      DateTime          @default(now())
+  /// A Creator Mode test run: isolated, not listed with the player's investigations
+  isPreview         Boolean           @default(false)
+  /// Set when the case file was submitted and an ending reached
+  endingKey         String?
+  endedAt           DateTime?
 
   user               User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   scenarioVersion    ScenarioVersion      @relation(fields: [scenarioVersionId], references: [id], onDelete: Restrict)
@@ -373,6 +399,12 @@ model GameSession {
   gameEvents         GameEvent[]
   memories           NPCMemory[]
   agentRuns          AgentRun[]
+  simulation         SimulationState?
+  simulationTicks    SimulationTick[]
+  intentionRuns      IntentionRun[]
+  choicesMade        PlayerChoice[]
+  hypotheses         Hypothesis[]
+  caseFile           CaseFile?
 
   @@index([userId, lastPlayedAt])
 }
@@ -756,4 +788,197 @@ model AuditLog {
 
   @@index([userId, createdAt])
   @@index([action, createdAt])
+}
+
+// ─── Investigation content (Phase 3) ───────────────────────────────────────────────────────────
+
+model Suspect {
+  id                String  @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  name              String
+  title             String
+  description       String
+  motive            String
+  /// The NPC this suspect is, if any
+  npcKey            String?
+
+  scenarioVersion ScenarioVersion @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([scenarioVersionId, key])
+}
+
+enum EvidenceRelation {
+  SUPPORTS
+  CONTRADICTS
+  LEADS_TO
+  IMPLICATES
+  EXONERATES
+}
+
+/// How two pieces of evidence, or a piece of evidence and a suspect, relate. Shown to the player
+/// once both ends are known.
+model EvidenceLink {
+  id                String           @id @default(cuid())
+  scenarioVersionId String
+  fromEvidenceKey   String
+  toEvidenceKey     String?
+  toSuspectKey      String?
+  relation          EvidenceRelation
+  note              String
+
+  scenarioVersion ScenarioVersion @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+
+  @@index([scenarioVersionId])
+}
+
+/// A possible ending. The first ending (by priority) whose conditions the case file meets is reached.
+model Ending {
+  id                String @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  title             String
+  description       String
+  priority          Int
+  /// Conditions (Zod-validated, src/server/engine/investigation.ts): suspect, evidence, choices
+  conditions        Json
+  /// Engine effects applied once when this ending is reached
+  effects           Json   @default("[]")
+  /// "triumph", "bittersweet", "dark" or "neutral", for presentation
+  tone              String @default("neutral")
+
+  scenarioVersion ScenarioVersion @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([scenarioVersionId, key])
+}
+
+/// A decision the city puts to the player (offered by the simulation), with options and their effects.
+model Choice {
+  id                String  @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  title             String
+  prompt            String
+  offeredByNpcKey   String?
+  /// [{ key, label, description, effects }]
+  options           Json
+
+  scenarioVersion ScenarioVersion @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([scenarioVersionId, key])
+}
+
+/// Something an NPC or a faction does on its own when its conditions hold (bounded, see simulation.ts).
+model NpcIntention {
+  id                String  @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  /// "npc" or "faction"
+  actorType         String
+  actorKey          String
+  goal              String
+  title             String
+  description       String
+  /// Conditions and effects (Zod-validated)
+  conditions        Json
+  effects           Json
+  once              Boolean @default(true)
+  cooldownTicks     Int     @default(0)
+  sortOrder         Int     @default(0)
+
+  scenarioVersion ScenarioVersion @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+  runs            IntentionRun[]
+
+  @@unique([scenarioVersionId, key])
+}
+
+// ─── Investigation and simulation state (Phase 3) ──────────────────────────────────────────────
+
+model SimulationState {
+  id            String    @id @default(cuid())
+  gameSessionId String    @unique
+  paused        Boolean   @default(false)
+  tick          Int       @default(0)
+  lastTickAt    DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+}
+
+enum TickTrigger {
+  TURN
+  MANUAL
+  SCHEDULE
+}
+
+model SimulationTick {
+  id             String      @id @default(cuid())
+  gameSessionId  String
+  tick           Int
+  trigger        TickTrigger
+  /// Makes ticks safe to retry, e.g. "turn:12" for the automatic tick after turn 12
+  idempotencyKey String
+  /// [{ intention, actor, status, reason?, outcomes }]
+  actions        Json
+  durationMs     Int
+  createdAt      DateTime    @default(now())
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, idempotencyKey])
+  @@unique([gameSessionId, tick])
+}
+
+model IntentionRun {
+  id            String   @id @default(cuid())
+  gameSessionId String
+  intentionId   String
+  tick          Int
+  createdAt     DateTime @default(now())
+
+  gameSession GameSession  @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  intention   NpcIntention @relation(fields: [intentionId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, intentionId, tick])
+  @@index([gameSessionId, intentionId])
+}
+
+model PlayerChoice {
+  id            String    @id @default(cuid())
+  gameSessionId String
+  choiceKey     String
+  optionKey     String?
+  offeredAt     DateTime  @default(now())
+  decidedAt     DateTime?
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, choiceKey])
+}
+
+/// A working theory on the evidence board. Saving one changes nothing in the world.
+model Hypothesis {
+  id            String   @id @default(cuid())
+  gameSessionId String
+  suspectKey    String
+  evidenceKeys  String[]
+  note          String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+
+  @@index([gameSessionId])
+}
+
+/// The final accusation. One per investigation; it decides the ending.
+model CaseFile {
+  id            String   @id @default(cuid())
+  gameSessionId String   @unique
+  suspectKey    String
+  evidenceKeys  String[]
+  endingKey     String
+  createdAt     DateTime @default(now())
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
 }
