@@ -6,6 +6,7 @@ import { assertSameOrigin, requireUser } from "@/server/auth";
 import { prisma } from "@/server/db";
 import { mockDialogueProvider } from "@/server/dialogue/mock";
 import { executeCommand } from "@/server/engine";
+import { autoTick } from "@/server/engine/simulation";
 import { buildGameView } from "@/server/engine/view";
 import { rateLimit, readJson, route } from "@/server/http";
 
@@ -44,5 +45,10 @@ export const POST = route(async (request: NextRequest, { params }: Context) => {
     });
     if (!reaction.ok) reactionError = reaction.message;
   }
-  return NextResponse.json({ result: { ...result, ...(reactionError ? { reactionError } : {}) }, view: await buildGameView(prisma, sessionId, user.id, user.callsign) });
+  // The city moves on after every few player turns (bounded, deterministic; see simulation.ts)
+  const simulation = result.replayed ? null : await autoTick(prisma, sessionId, user.id, result.turn);
+  return NextResponse.json({
+    result: { ...result, ...(reactionError ? { reactionError } : {}), simulation },
+    view: await buildGameView(prisma, sessionId, user.id, user.callsign),
+  });
 });

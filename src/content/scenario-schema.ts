@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TOOL_NAMES } from "@/server/agents/tool-names";
+import { conditionListSchema } from "@/server/engine/conditions";
 import { EFFECT_TYPES, effectListSchema } from "@/server/engine/effects";
 
 /**
@@ -23,6 +24,17 @@ export const personaSchema = z.object({
   behavioralRules: z.array(z.string()).min(1),
 });
 
+/** What a case file must contain to reach an ending. Empty conditions make a fallback ending. */
+export const endingConditionsSchema = z.object({
+  suspectKeys: z.array(key).default([]),
+  /** Every one of these must be in the case file */
+  requiredEvidence: z.array(key).default([]),
+  /** From each group, at least one must be in the case file */
+  anyOfEvidence: z.array(z.array(key).min(1)).default([]),
+  /** A decision the player made during the investigation */
+  choice: z.object({ choiceKey: key, option: key }).optional(),
+});
+
 export const scenarioSchema = z.object({
   slug: key,
   title: z.string(),
@@ -42,6 +54,7 @@ export const scenarioSchema = z.object({
       isStartingPoint: z.boolean().default(false),
       startsUnlocked: z.boolean().default(false),
       lockedReason: z.string().optional(),
+      unlockItemKeys: z.array(key).default([]),
       loot: z.array(z.object({ itemKey: key, quantity: z.number().int().positive(), foundText: z.string() })).default([]),
     }),
   ),
@@ -112,9 +125,10 @@ export const scenarioSchema = z.object({
           z.object({
             key,
             description: z.string(),
-            kind: z.enum(["TALK_TO", "VISIT_LOCATION", "DISCOVER_EVIDENCE", "COLLECT_ITEM", "DELIVER_ITEM", "ASK_ABOUT"]),
+            kind: z.enum(["TALK_TO", "VISIT_LOCATION", "DISCOVER_EVIDENCE", "COLLECT_ITEM", "DELIVER_ITEM", "ASK_ABOUT", "TRUST_AT_LEAST", "CLOSE_CASE"]),
             targetKey: key,
             recipientKey: key.optional(),
+            threshold: z.number().int().optional(),
             optional: z.boolean().default(false),
             onCompleteEffects: effectListSchema.default([]),
           }),
@@ -122,6 +136,60 @@ export const scenarioSchema = z.object({
         .min(1),
     }),
   ),
+  simulation: z
+    .object({ everyTurns: z.number().int().min(1).max(50).default(3), maxActionsPerTick: z.number().int().min(0).max(10).default(2) })
+    .default({ everyTurns: 3, maxActionsPerTick: 2 }),
+  suspects: z.array(z.object({ key, name: z.string(), title: z.string(), description: z.string(), motive: z.string(), npcKey: key.optional() })).default([]),
+  evidenceLinks: z
+    .array(
+      z.object({
+        fromEvidenceKey: key,
+        toEvidenceKey: key.optional(),
+        toSuspectKey: key.optional(),
+        relation: z.enum(["SUPPORTS", "CONTRADICTS", "LEADS_TO", "IMPLICATES", "EXONERATES"]),
+        note: z.string(),
+      }),
+    )
+    .default([]),
+  choices: z
+    .array(
+      z.object({
+        key,
+        title: z.string(),
+        prompt: z.string(),
+        offeredByNpcKey: key.optional(),
+        options: z.array(z.object({ key, label: z.string(), description: z.string(), effects: effectListSchema.default([]) })).min(2).max(4),
+      }),
+    )
+    .default([]),
+  intentions: z
+    .array(
+      z.object({
+        key,
+        actorType: z.enum(["npc", "faction"]),
+        actorKey: key,
+        goal: z.string(),
+        title: z.string(),
+        description: z.string(),
+        conditions: conditionListSchema,
+        effects: effectListSchema,
+        once: z.boolean().default(true),
+        cooldownTicks: z.number().int().min(0).max(100).default(0),
+      }),
+    )
+    .default([]),
+  endings: z
+    .array(
+      z.object({
+        key,
+        title: z.string(),
+        description: z.string(),
+        tone: z.enum(["triumph", "bittersweet", "dark", "neutral"]).default("neutral"),
+        conditions: endingConditionsSchema,
+        effects: effectListSchema.default([]),
+      }),
+    )
+    .default([]),
 });
 
 export type ScenarioDefinition = z.output<typeof scenarioSchema>;
@@ -176,6 +244,64 @@ export function validateScenarioReferences(s: ScenarioDefinition): string[] {
       if ("locationKey" in e) need("location", e.locationKey, where);
       if ("questKey" in e) need("quest", e.questKey, where);
     });
+  const sets2 = {
+    suspect: new Set(s.suspects.map((x) => x.key)),
+    choice: new Set(s.choices.map((x) => x.key)),
+  };
+  const needX = (kind: "suspect" | "choice", value: string | undefined, where: string) => {
+    if (value !== undefined && !sets2[kind].has(value)) errors.push(`${where}: unknown ${kind} "${value}"`);
+  };
+  s.locations.forEach((l) => l.unlockItemKeys.forEach((i) => need("item", i, `location ${l.key} unlockItemKeys`)));
+  s.suspects.forEach((x) => need("npc", x.npcKey, `suspect ${x.key}`));
+  s.evidenceLinks.forEach((l, i) => {
+    const where = `evidence link ${i + 1}`;
+    need("evidence", l.fromEvidenceKey, where);
+    need("evidence", l.toEvidenceKey, where);
+    needX("suspect", l.toSuspectKey, where);
+    if (!l.toEvidenceKey === !l.toSuspectKey) errors.push(`${where}: needs exactly one of toEvidenceKey or toSuspectKey`);
+  });
+  const conditionRefs = (conditions: z.infer<typeof conditionListSchema>, where: string) =>
+    conditions.forEach((c) => {
+      if ("questKey" in c) need("quest", c.questKey, where);
+      if ("evidenceKey" in c) need("evidence", c.evidenceKey, where);
+      if ("itemKey" in c) need("item", c.itemKey, where);
+      if ("npcKey" in c) need("npc", c.npcKey, where);
+      if ("factionKey" in c) need("faction", c.factionKey, where);
+      if ("locationKey" in c) need("location", c.locationKey, where);
+      if (c.type === "choice") needX("choice", c.choiceKey, where);
+    });
+  s.choices.forEach((c) => {
+    need("npc", c.offeredByNpcKey, `choice ${c.key}`);
+    c.options.forEach((o) => effectRefs(o.effects, `choice ${c.key} option ${o.key}`));
+  });
+  s.intentions.forEach((x) => {
+    const where = `intention ${x.key}`;
+    if (x.actorType === "npc") need("npc", x.actorKey, where);
+    else need("faction", x.actorKey, where);
+    conditionRefs(x.conditions, where);
+    effectRefs(x.effects, where);
+    x.effects.forEach((e) => e.type === "offer_choice" && needX("choice", e.choiceKey, where));
+  });
+  s.endings.forEach((e) => {
+    const where = `ending ${e.key}`;
+    e.conditions.suspectKeys.forEach((k) => needX("suspect", k, where));
+    e.conditions.requiredEvidence.forEach((k) => need("evidence", k, where));
+    e.conditions.anyOfEvidence.flat().forEach((k) => need("evidence", k, where));
+    if (e.conditions.choice) {
+      needX("choice", e.conditions.choice.choiceKey, where);
+      const choice = s.choices.find((c) => c.key === e.conditions.choice!.choiceKey);
+      if (choice && !choice.options.some((o) => o.key === e.conditions.choice!.option)) errors.push(`${where}: unknown option "${e.conditions.choice.option}"`);
+    }
+    effectRefs(e.effects, where);
+  });
+  if (s.endings.length && !s.endings.some((e) => !e.conditions.suspectKeys.length && !e.conditions.requiredEvidence.length && !e.conditions.anyOfEvidence.length && !e.conditions.choice)) {
+    errors.push("endings need a fallback ending without conditions");
+  }
+  for (const [kind, list] of Object.entries({ suspect: s.suspects, choice: s.choices, intention: s.intentions, ending: s.endings })) {
+    const keys = list.map((x) => x.key);
+    const dup = keys.find((k, i) => keys.indexOf(k) !== i);
+    if (dup) errors.push(`duplicate ${kind} key "${dup}"`);
+  }
   s.quests.forEach((q) => {
     need("npc", q.giverNpcKey, `quest ${q.key}`);
     need("quest", q.requiresQuestKey, `quest ${q.key}`);
@@ -183,8 +309,9 @@ export function validateScenarioReferences(s: ScenarioDefinition): string[] {
     effectRefs(q.onCompleteEffects, `quest ${q.key}`);
     q.objectives.forEach((o) => {
       const where = `quest ${q.key} objective ${o.key}`;
-      const kind = { TALK_TO: "npc", VISIT_LOCATION: "location", DISCOVER_EVIDENCE: "evidence", COLLECT_ITEM: "item", DELIVER_ITEM: "item", ASK_ABOUT: "evidence" } as const;
-      need(kind[o.kind], o.targetKey, where);
+      const kind = { TALK_TO: "npc", VISIT_LOCATION: "location", DISCOVER_EVIDENCE: "evidence", COLLECT_ITEM: "item", DELIVER_ITEM: "item", ASK_ABOUT: "evidence", TRUST_AT_LEAST: "npc", CLOSE_CASE: null } as const;
+      if (kind[o.kind]) need(kind[o.kind]!, o.targetKey, where);
+      if (o.kind === "TRUST_AT_LEAST" && o.threshold === undefined) errors.push(`${where}: TRUST_AT_LEAST needs a threshold`);
       need("npc", o.recipientKey, where);
       if ((o.kind === "DELIVER_ITEM" || o.kind === "ASK_ABOUT") && !o.recipientKey) errors.push(`${where}: ${o.kind} needs a recipientKey`);
       effectRefs(o.onCompleteEffects, where);

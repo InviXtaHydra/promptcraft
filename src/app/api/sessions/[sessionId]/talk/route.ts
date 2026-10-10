@@ -5,6 +5,7 @@ import { agentDeps } from "@/server/agents/runtime";
 import { assertSameOrigin, requireUser } from "@/server/auth";
 import { prisma } from "@/server/db";
 import { GameError } from "@/server/errors";
+import { autoTick } from "@/server/engine/simulation";
 import { buildGameView } from "@/server/engine/view";
 import { rateLimit, readJson, route } from "@/server/http";
 
@@ -27,7 +28,7 @@ export const POST = route(async (request: NextRequest, { params }: Context) => {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let open = true;
-      const send = (event: TurnEvent | { type: "view"; view: unknown }) => {
+      const send = (event: TurnEvent | { type: "view"; view: unknown } | { type: "simulation"; tick: unknown }) => {
         if (!open) return;
         try {
           controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
@@ -36,7 +37,9 @@ export const POST = route(async (request: NextRequest, { params }: Context) => {
         }
       };
       try {
-        await runNpcTurn(agentDeps(), { userId: user.id, sessionId, ...body }, { signal: request.signal, onEvent: send });
+        const turn = await runNpcTurn(agentDeps(), { userId: user.id, sessionId, ...body }, { signal: request.signal, onEvent: send });
+        const tick = turn.replayed ? null : await autoTick(prisma, sessionId, user.id, turn.turn);
+        if (tick) send({ type: "simulation", tick });
         send({ type: "view", view: await buildGameView(prisma, sessionId, user.id, user.callsign) });
       } catch (error) {
         // Errors inside a run were already sent as an "error" event; this covers requests that never started one

@@ -1,6 +1,9 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { notFound } from "../errors";
 import type { PrismaClient, TransactionClient } from "../prisma-client";
+import { z } from "zod";
+import { endingConditionsSchema } from "@/content/scenario-schema";
+import { conditionListSchema } from "./conditions";
 import { effectListSchema, type Effect } from "./effects";
 
 type Db = PrismaClient | TransactionClient;
@@ -19,6 +22,11 @@ async function loadContentUncached(db: Db, scenarioVersionId: string) {
       items: true,
       quests: { include: { objectives: { orderBy: { sortOrder: "asc" } }, giver: true }, orderBy: { sortOrder: "asc" } },
       evidence: { include: { location: true } },
+      suspects: true,
+      evidenceLinks: true,
+      endings: { orderBy: { priority: "asc" } },
+      choices: true,
+      intentions: { orderBy: { sortOrder: "asc" } },
     },
   });
   const byKey = <T extends { key: string }>(rows: T[]) => new Map(rows.map((r) => [r.key, r]));
@@ -28,6 +36,12 @@ async function loadContentUncached(db: Db, scenarioVersionId: string) {
     return parsed.data;
   };
   const startingItems = (version.startingItems as { itemKey: string; quantity: number }[]) ?? [];
+  const strict = <T extends z.ZodType>(schema: T, json: Prisma.JsonValue, where: string): z.output<T> => {
+    const parsed = schema.safeParse(json);
+    if (!parsed.success) throw new Error(`Invalid ${where}: ${parsed.error.message}`);
+    return parsed.data;
+  };
+  const optionSchema = z.array(z.object({ key: z.string(), label: z.string(), description: z.string(), effects: effectListSchema }));
   return {
     id: version.id,
     title: version.scenario.title,
@@ -49,6 +63,13 @@ async function loadContentUncached(db: Db, scenarioVersionId: string) {
     ),
     evidence: byKey(version.evidence),
     evidenceById: new Map(version.evidence.map((e) => [e.id, e])),
+    status: version.status,
+    simulation: { everyTurns: version.simulationEveryTurns, maxActionsPerTick: version.simulationMaxActions },
+    suspects: byKey(version.suspects),
+    evidenceLinks: version.evidenceLinks,
+    endings: version.endings.map((e) => ({ ...e, parsedConditions: strict(endingConditionsSchema, e.conditions, `ending ${e.key}`), parsedEffects: parseEffects(e.effects, `ending ${e.key}`) })),
+    choices: byKey(version.choices.map((c) => ({ ...c, parsedOptions: strict(optionSchema, c.options, `choice ${c.key}`) }))),
+    intentions: version.intentions.map((i) => ({ ...i, parsedConditions: strict(conditionListSchema, i.conditions, `intention ${i.key}`), parsedEffects: parseEffects(i.effects, `intention ${i.key}`) })),
   };
 }
 
@@ -84,6 +105,13 @@ export type PlayerState = {
   talkedTo: Set<string>;
   worldEventKeys: Set<string>;
   collectedLoot: Set<string>;
+  /** Choices offered to the player: option key once decided, null while pending */
+  choices: Map<string, string | null>;
+  /** Kinds of memory each NPC holds about the player in this investigation */
+  memoryKinds: Map<string, Set<string>>;
+  /** Simulation tick count */
+  tick: number;
+  endingKey: string | null;
 };
 
 export type SessionContext = {
@@ -100,7 +128,7 @@ export const objectiveId = (questKey: string, objectiveKey: string) => `${questK
  * exactly like one that doesn't exist, so ids can't be probed.
  */
 export async function loadSessionContext(db: Db, sessionId: string, userId: string): Promise<SessionContext> {
-  const session = await db.gameSession.findFirst({ where: { id: sessionId, userId }, include: { worldState: true } });
+  const session = await db.gameSession.findFirst({ where: { id: sessionId, userId }, include: { worldState: true, simulation: true } });
   if (!session || !session.worldState) throw notFound("Game session");
   const content = await loadContent(db, session.scenarioVersionId);
 
@@ -116,6 +144,12 @@ export async function loadSessionContext(db: Db, sessionId: string, userId: stri
     db.worldEvent.findMany({ where: { gameSessionId: sessionId, key: { not: null } }, select: { key: true } }),
     db.collectedLoot.findMany({ where: { gameSessionId: sessionId } }),
   ]);
+  const [choices, memoryKinds] = await Promise.all([
+    db.playerChoice.findMany({ where: { gameSessionId: sessionId } }),
+    db.nPCMemory.findMany({ where: { gameSessionId: sessionId }, select: { npcKey: true, kind: true }, distinct: ["npcKey", "kind"] }),
+  ]);
+  const kinds = new Map<string, Set<string>>();
+  for (const m of memoryKinds) kinds.set(m.npcKey, (kinds.get(m.npcKey) ?? new Set()).add(m.kind));
 
   const locationKey = (id: string) => content.locationsById.get(id)!.key;
   const questKey = (id: string) => [...content.quests.values()].find((q) => q.id === id)!.key;
@@ -141,6 +175,10 @@ export async function loadSessionContext(db: Db, sessionId: string, userId: stri
       talkedTo: new Set(conversations.map((c) => content.npcsById.get(c.npcId)!.key)),
       worldEventKeys: new Set(events.map((e) => e.key!)),
       collectedLoot: new Set(loot.map((l) => l.lootId)),
+      choices: new Map(choices.map((c) => [c.choiceKey, c.optionKey])),
+      memoryKinds: kinds,
+      tick: session.simulation?.tick ?? 0,
+      endingKey: session.endingKey,
     },
   };
 }

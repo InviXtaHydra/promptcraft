@@ -35,6 +35,7 @@ export const effectSchema = z.discriminatedUnion("type", [
     description: z.string().min(1).max(600),
     severity: z.enum(SEVERITIES).default("INFO"),
   }),
+  z.object({ type: z.literal("offer_choice"), choiceKey: key }),
   z.object({
     type: z.literal("memory"),
     npcKey: key,

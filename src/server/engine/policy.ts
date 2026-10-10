@@ -59,6 +59,11 @@ export function checkProposals(ctx: SessionContext, npcKey: string, proposals: u
         return { ok: true, effect };
       case "world_event":
         return { ok: true, effect };
+      case "offer_choice": {
+        const choice = ctx.content.choices.get(effect.choiceKey);
+        if (!choice || choice.offeredByNpcKey !== npc.key) return { ok: false, reason: "an NPC can only put its own decisions to the player", raw };
+        return { ok: true, effect };
+      }
       default:
         // credits, items, locations: only commands handled by the engine itself
         return { ok: false, reason: `${effect.type} is reserved for the game engine`, raw };

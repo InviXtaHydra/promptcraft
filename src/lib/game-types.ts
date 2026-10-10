@@ -58,6 +58,16 @@ export type GameView = {
   evidence: { key: string; title: string; description: string; reliability: Reliability; tags: string[]; provenance: string; discoveredAt: string }[];
   factions: { key: string; name: string; accent: string; reputation: number }[];
   events: { id: string; title: string; description: string; severity: Severity; actor: "PLAYER" | "NPC" | "SYSTEM"; turn: number; createdAt: string }[];
+  investigation: {
+    suspects: { key: string; name: string; title: string; description: string; motive: string }[];
+    links: { from: string; to: string; toType: "evidence" | "suspect"; relation: "SUPPORTS" | "CONTRADICTS" | "LEADS_TO" | "IMPLICATES" | "EXONERATES"; note: string }[];
+    hypotheses: { id: string; suspectKey: string; evidenceKeys: string[]; note: string; assessment: { score: number; verdict: "strong" | "plausible" | "weak" | "contradicted"; reasons: string[] } }[];
+    /** True when the case can be submitted (the CLOSE_CASE objective is open) */
+    canSubmit: boolean;
+    ending: { key: string; title: string; description: string; tone: string; suspectKey: string; evidenceKeys: string[] } | null;
+  };
+  choices: { key: string; title: string; prompt: string; options: { key: string; label: string; description: string }[] }[];
+  simulation: { tick: number; paused: boolean; everyTurns: number; nextTickInTurns: number };
 };
 
 export type ConversationView = {
@@ -83,7 +93,7 @@ export type SessionSummary = {
 export type OutcomeSummary = { type: string; status: "applied" | "skipped"; text: string };
 
 export type CommandResponse = {
-  result: { type: string; turn: number; narration: string[]; outcomes: OutcomeSummary[]; npcKey?: string; replayed: boolean; reactionError?: string };
+  result: { type: string; turn: number; narration: string[]; outcomes: OutcomeSummary[]; npcKey?: string; replayed: boolean; reactionError?: string; simulation?: SimulationTickView | null };
   view: GameView;
 };
 
@@ -123,6 +133,7 @@ export type TurnStreamEvent =
   | { type: "delta"; text: string }
   | { type: "usage"; inputTokens: number; outputTokens: number; modelCalls: number; retries: number }
   | { type: "view"; view: GameView }
+  | { type: "simulation"; tick: SimulationTickView }
   | { type: "done"; messageId: string | null; reply: string | null; turn: number | null; replayed: boolean }
   | { type: "error"; code: string; message: string };
 
@@ -130,4 +141,11 @@ export type AiStatusView = {
   dialogue: { provider: string; model: string; simulated: boolean };
   embeddings: { model: string; simulated: boolean };
   ollama: { url: string; reachable: boolean; chatModelInstalled: boolean; embedModelInstalled: boolean } | null;
+};
+
+export type SimulationTickView = {
+  tick: number;
+  trigger: "TURN" | "MANUAL" | "SCHEDULE";
+  actions: { intention: string; actor: string; title: string; status: "executed" | "rejected" | "skipped"; reason?: string; outcomes: { status: string; text: string }[] }[];
+  replayed: boolean;
 };

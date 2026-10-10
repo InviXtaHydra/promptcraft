@@ -5,6 +5,7 @@ import type { TransactionClient } from "../prisma-client";
 import { applyEffects, type AppliedOutcome } from "./apply";
 import { npcsReachableFrom, objectiveId, type SessionContext } from "./context";
 import type { Effect } from "./effects";
+import { chooseEnding } from "./investigation";
 
 const key = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]*$/);
 
@@ -14,6 +15,15 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("investigate") }),
   z.object({ type: z.literal("give"), npcKey: key, itemKey: key }),
   z.object({ type: z.literal("buy"), npcKey: key, itemKey: key }),
+  z.object({ type: z.literal("choose"), choiceKey: key, optionKey: key }),
+  z.object({
+    type: z.literal("save_hypothesis"),
+    suspectKey: key,
+    evidenceKeys: z.array(key).min(1, "Pick at least one piece of evidence").max(8),
+    note: z.string().trim().max(300).default(""),
+  }),
+  z.object({ type: z.literal("discard_hypothesis"), hypothesisId: z.string().min(1).max(40) }),
+  z.object({ type: z.literal("submit_case"), suspectKey: key, evidenceKeys: z.array(key).min(1, "A case needs evidence").max(12) }),
 ]);
 export type Command = z.infer<typeof commandSchema>;
 
@@ -52,7 +62,13 @@ async function travel({ tx, ctx }: Deps, cmd: Extract<Command, { type: "travel" 
   const location = ctx.content.locations.get(cmd.locationKey);
   if (!location) throw rejected("unknown_location", "That place isn't on your map");
   if (location.key === ctx.state.currentLocationKey) throw rejected("already_here", `You're already in ${location.name}`);
-  if (!ctx.state.unlocked.has(location.key)) throw rejected("location_locked", location.lockedReason ?? `${location.name} is locked`);
+  if (!ctx.state.unlocked.has(location.key)) {
+    // Any of the location's unlock items opens it (several routes keep the story solvable)
+    const key = location.unlockItemKeys.find((k) => ctx.state.inventory.has(k));
+    if (!key) throw rejected("location_locked", location.lockedReason ?? `${location.name} is locked`);
+    await tx.locationAccess.create({ data: { gameSessionId: ctx.sessionId, locationId: location.id } });
+    ctx.state.unlocked.add(location.key);
+  }
 
   await tx.worldState.update({ where: { gameSessionId: ctx.sessionId }, data: { currentLocationId: location.id } });
   await tx.locationAccess.updateMany({ where: { gameSessionId: ctx.sessionId, locationId: location.id, visitedAt: null }, data: { visitedAt: new Date() } });
@@ -177,4 +193,61 @@ async function buy({ tx, ctx }: Deps, cmd: Extract<Command, { type: "buy" }>): P
   return { narration: [`You pay ${price} credits${discounted ? " (friend price)" : ""} and pocket the ${item.name}.`], outcomes: await applyEffects(tx, ctx, effects, { kind: "engine" }) };
 }
 
-export const handlers = { travel, investigate, give, buy } satisfies Record<Command["type"], (deps: Deps, cmd: never) => Promise<HandlerResult>>;
+async function choose({ tx, ctx }: Deps, cmd: Extract<Command, { type: "choose" }>): Promise<HandlerResult> {
+  const choice = ctx.content.choices.get(cmd.choiceKey);
+  if (!choice || !ctx.state.choices.has(choice.key)) throw rejected("no_such_choice", "That decision isn't in front of you");
+  if (ctx.state.choices.get(choice.key)) throw rejected("already_decided", "You already made this decision");
+  const option = choice.parsedOptions.find((o) => o.key === cmd.optionKey);
+  if (!option) throw rejected("no_such_option", "That isn't one of the options");
+  await tx.playerChoice.update({ where: { gameSessionId_choiceKey: { gameSessionId: ctx.sessionId, choiceKey: choice.key } }, data: { optionKey: option.key, decidedAt: new Date() } });
+  ctx.state.choices.set(choice.key, option.key);
+  return { narration: [`${choice.title}: ${option.label}.`], outcomes: await applyEffects(tx, ctx, option.effects, { kind: "engine" }) };
+}
+
+const MAX_HYPOTHESES = 10;
+
+async function saveHypothesis({ tx, ctx }: Deps, cmd: Extract<Command, { type: "save_hypothesis" }>): Promise<HandlerResult> {
+  if (!ctx.content.suspects.has(cmd.suspectKey)) throw rejected("unknown_suspect", "That person isn't on the suspect list");
+  const unknown = cmd.evidenceKeys.find((k) => !ctx.state.evidence.has(k));
+  if (unknown) throw rejected("unknown_evidence", "You can only use evidence you have found");
+  if ((await tx.hypothesis.count({ where: { gameSessionId: ctx.sessionId } })) >= MAX_HYPOTHESES) throw rejected("too_many_hypotheses", `Keep at most ${MAX_HYPOTHESES} theories; discard one first`);
+  await tx.hypothesis.create({ data: { gameSessionId: ctx.sessionId, suspectKey: cmd.suspectKey, evidenceKeys: [...new Set(cmd.evidenceKeys)], note: cmd.note } });
+  return { narration: [`Theory pinned to the board: ${ctx.content.suspects.get(cmd.suspectKey)!.name}.`], outcomes: [] };
+}
+
+async function discardHypothesis({ tx, ctx }: Deps, cmd: Extract<Command, { type: "discard_hypothesis" }>): Promise<HandlerResult> {
+  const removed = await tx.hypothesis.deleteMany({ where: { id: cmd.hypothesisId, gameSessionId: ctx.sessionId } });
+  if (removed.count === 0) throw rejected("unknown_hypothesis", "That theory isn't on your board");
+  return { narration: ["Theory taken off the board."], outcomes: [] };
+}
+
+/** The conclusion: once per investigation, decided by the selected evidence and recorded choices. */
+async function submitCase({ tx, ctx }: Deps, cmd: Extract<Command, { type: "submit_case" }>): Promise<HandlerResult> {
+  const closing = [...ctx.content.quests.values()]
+    .filter((q) => ctx.state.questStatus.get(q.key) === "ACTIVE")
+    .flatMap((q) => q.objectives.filter((o) => o.kind === "CLOSE_CASE").map((o) => ({ quest: q, o })))
+    .find(({ quest, o }) => !ctx.state.objectivesDone.has(objectiveId(quest.key, o.key)));
+  if (!closing) throw rejected("no_open_case", "There's no case to close yet. Follow the investigation first.");
+  if (ctx.state.endingKey) throw rejected("case_closed", "You already submitted your case");
+  if (!ctx.content.suspects.has(cmd.suspectKey)) throw rejected("unknown_suspect", "That person isn't on the suspect list");
+  const evidenceKeys = [...new Set(cmd.evidenceKeys)];
+  if (evidenceKeys.some((k) => !ctx.state.evidence.has(k))) throw rejected("unknown_evidence", "You can only submit evidence you have found");
+  const ending = chooseEnding(ctx.content, { suspectKey: cmd.suspectKey, evidenceKeys }, ctx.state.choices);
+  if (!ending) throw new Error("Scenario has no fallback ending");
+
+  await tx.caseFile.create({ data: { gameSessionId: ctx.sessionId, suspectKey: cmd.suspectKey, evidenceKeys, endingKey: ending.key } });
+  const outcomes = await applyEffects(tx, ctx, [{ type: "objective", questKey: closing.quest.key, objectiveKey: closing.o.key }], { kind: "engine" });
+  outcomes.push(
+    ...(await applyEffects(
+      tx,
+      ctx,
+      [...ending.parsedEffects, { type: "world_event", key: `ending-${ending.key}`, title: ending.title, description: ending.description, severity: ending.tone === "triumph" ? "NOTICE" : "WARNING" }],
+      { kind: "engine" },
+    )),
+  );
+  await tx.gameSession.update({ where: { id: ctx.sessionId }, data: { status: "COMPLETED", endingKey: ending.key, endedAt: new Date() } });
+  ctx.state.endingKey = ending.key;
+  return { narration: [`Case submitted against ${ctx.content.suspects.get(cmd.suspectKey)!.name}.`, ending.description], outcomes };
+}
+
+export const handlers = { travel, investigate, give, buy, choose, save_hypothesis: saveHypothesis, discard_hypothesis: discardHypothesis, submit_case: submitCase } satisfies Record<Command["type"], (deps: Deps, cmd: never) => Promise<HandlerResult>>;

@@ -153,7 +153,8 @@ async function applyOne(tx: TransactionClient, ctx: SessionContext, effect: Effe
       // Objectives the engine can verify from state are only completed by the engine itself
       if (objective.kind === "ASK_ABOUT" && !state.evidence.has(objective.targetKey)) return skip("the player doesn't have that evidence");
       if (objective.kind === "DELIVER_ITEM" && source.kind !== "engine") return skip("deliveries are completed by the engine");
-      if (["TALK_TO", "VISIT_LOCATION", "DISCOVER_EVIDENCE", "COLLECT_ITEM"].includes(objective.kind) && source.kind !== "engine") {
+      if (objective.kind === "CLOSE_CASE" && source.kind !== "engine") return skip("only submitting a case file closes the case");
+      if (["TALK_TO", "VISIT_LOCATION", "DISCOVER_EVIDENCE", "COLLECT_ITEM", "TRUST_AT_LEAST"].includes(objective.kind) && source.kind !== "engine") {
         return skip("this objective is completed by the engine from game state");
       }
       if (depth >= MAX_DEPTH) return skip("effect chain too deep");
@@ -180,6 +181,15 @@ async function applyOne(tx: TransactionClient, ctx: SessionContext, effect: Effe
       });
       if (effect.key) state.worldEventKeys.add(effect.key);
       return done(effect.title);
+    }
+
+    case "offer_choice": {
+      const choice = content.choices.get(effect.choiceKey);
+      if (!choice) return skip(`unknown choice ${effect.choiceKey}`);
+      if (state.choices.has(choice.key)) return skip("this decision was already put to the player");
+      await tx.playerChoice.create({ data: { gameSessionId: sessionId, choiceKey: choice.key } });
+      state.choices.set(choice.key, null);
+      return done(`A decision awaits: ${choice.title}`);
     }
 
     case "memory": {

@@ -6,7 +6,7 @@ import type { PrismaClient } from "./prisma-client";
  * Writes one scenario version and publishes it, in a single transaction. Used by `prisma db seed`
  * and by the integration tests. Returns without changes when this version already exists.
  */
-export async function seedScenario(prisma: PrismaClient, input: z.input<typeof scenarioSchema>) {
+export async function seedScenario(prisma: PrismaClient, input: z.input<typeof scenarioSchema>, options: { status?: "PUBLISHED" | "PREVIEW" } = {}) {
   const s = scenarioSchema.parse(input);
   const errors = validateScenarioReferences(s);
   if (errors.length) throw new Error(`Scenario "${s.slug}" is invalid:\n- ${errors.join("\n- ")}`);
@@ -21,7 +21,16 @@ export async function seedScenario(prisma: PrismaClient, input: z.input<typeof s
       update: { title: s.title, summary: s.summary },
     });
     const version = await tx.scenarioVersion.create({
-      data: { scenarioId: scenario.id, version: s.version, status: "DRAFT", startingCredits: s.startingCredits, startingItems: s.startingItems },
+      data: {
+        scenarioId: scenario.id,
+        version: s.version,
+        status: "DRAFT",
+        startingCredits: s.startingCredits,
+        startingItems: s.startingItems,
+        definition: input as object,
+        simulationEveryTurns: s.simulation.everyTurns,
+        simulationMaxActions: s.simulation.maxActionsPerTick,
+      },
     });
     const v = version.id;
 
@@ -54,6 +63,7 @@ export async function seedScenario(prisma: PrismaClient, input: z.input<typeof s
           isStartingPoint: l.isStartingPoint,
           startsUnlocked: l.startsUnlocked,
           lockedReason: l.lockedReason ?? null,
+          unlockItemKeys: l.unlockItemKeys,
         },
       });
       locationIds.set(l.key, row.id);
@@ -136,6 +146,7 @@ export async function seedScenario(prisma: PrismaClient, input: z.input<typeof s
               kind: o.kind,
               targetKey: o.targetKey,
               recipientKey: o.recipientKey ?? null,
+              threshold: o.threshold ?? null,
               optional: o.optional,
               sortOrder: i,
               onCompleteEffects: o.onCompleteEffects,
@@ -145,7 +156,40 @@ export async function seedScenario(prisma: PrismaClient, input: z.input<typeof s
       });
     }
 
-    await tx.scenarioVersion.update({ where: { id: v }, data: { status: "PUBLISHED", publishedAt: new Date() } });
+    for (const x of s.suspects) {
+      await tx.suspect.create({ data: { scenarioVersionId: v, key: x.key, name: x.name, title: x.title, description: x.description, motive: x.motive, npcKey: x.npcKey ?? null } });
+    }
+    if (s.evidenceLinks.length) {
+      await tx.evidenceLink.createMany({
+        data: s.evidenceLinks.map((l) => ({ scenarioVersionId: v, fromEvidenceKey: l.fromEvidenceKey, toEvidenceKey: l.toEvidenceKey ?? null, toSuspectKey: l.toSuspectKey ?? null, relation: l.relation, note: l.note })),
+      });
+    }
+    for (const c of s.choices) {
+      await tx.choice.create({ data: { scenarioVersionId: v, key: c.key, title: c.title, prompt: c.prompt, offeredByNpcKey: c.offeredByNpcKey ?? null, options: c.options } });
+    }
+    for (const [index, x] of s.intentions.entries()) {
+      await tx.npcIntention.create({
+        data: {
+          scenarioVersionId: v,
+          key: x.key,
+          actorType: x.actorType,
+          actorKey: x.actorKey,
+          goal: x.goal,
+          title: x.title,
+          description: x.description,
+          conditions: x.conditions,
+          effects: x.effects,
+          once: x.once,
+          cooldownTicks: x.cooldownTicks,
+          sortOrder: index,
+        },
+      });
+    }
+    for (const [index, e] of s.endings.entries()) {
+      await tx.ending.create({ data: { scenarioVersionId: v, key: e.key, title: e.title, description: e.description, priority: index, conditions: e.conditions, effects: e.effects, tone: e.tone } });
+    }
+
+    await tx.scenarioVersion.update({ where: { id: v }, data: { status: options.status ?? "PUBLISHED", publishedAt: (options.status ?? "PUBLISHED") === "PUBLISHED" ? new Date() : null } });
     return v;
   });
 

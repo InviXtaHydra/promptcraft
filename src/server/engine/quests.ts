@@ -15,6 +15,8 @@ export function isSatisfiedByState(objective: Objective, state: PlayerState): bo
       return state.evidence.has(objective.targetKey);
     case "COLLECT_ITEM":
       return (state.inventory.get(objective.targetKey) ?? 0) > 0;
+    case "TRUST_AT_LEAST":
+      return (state.relationships.get(objective.targetKey)?.trust ?? -Infinity) >= (objective.threshold ?? Infinity);
     default:
       return false; // DELIVER_ITEM and ASK_ABOUT are completed by commands and dialogue
   }

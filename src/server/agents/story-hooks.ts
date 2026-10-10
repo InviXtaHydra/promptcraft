@@ -6,11 +6,11 @@ import type { ToolCall } from "./tools";
  * model says (the quest giver always offers a quest on first contact); "hints" tell the model what
  * would make sense now, and it decides. Both still go through the normal tool checks.
  */
-/** The evidence's main noun ("badge" for "Scorched Courier Badge"), or its full title */
-function mentions(message: string, title: string) {
+/** Whether the message brings up a piece of evidence: a meaningful word of its title, or one of its tags */
+export function mentions(message: string, evidence: { title: string; tags: string[] }) {
   const text = message.toLowerCase();
-  const noun = title.toLowerCase().split(/\s+/).at(-1) ?? "";
-  return text.includes(title.toLowerCase()) || (noun.length > 3 && new RegExp(`\\b${noun}s?\\b`).test(text));
+  const words = [...evidence.title.toLowerCase().split(/[^a-z0-9]+/), ...evidence.tags.map((t) => t.toLowerCase())].filter((w) => w.length >= 4);
+  return words.some((w) => new RegExp(`\\b${w}s?\\b`).test(text));
 }
 
 export function storyHooks(ctx: SessionContext, npcKey: string, message = ""): { required: ToolCall[]; hints: string[] } {
@@ -41,7 +41,7 @@ export function storyHooks(ctx: SessionContext, npcKey: string, message = ""): {
       if (o.kind === "ASK_ABOUT" && o.recipientKey === npcKey && state.evidence.has(o.targetKey)) {
         const evidence = content.evidence.get(o.targetKey)!;
         // The player holds the evidence and brings it up: that is the objective, whatever the model decides
-        if (mentions(message, evidence.title)) {
+        if (mentions(message, evidence)) {
           required.push({ tool: "update_quest", args: { action: "complete_objective", questKey: quest.key, objectiveKey: o.key }, source: "story-rule" });
         }
         hints.push(

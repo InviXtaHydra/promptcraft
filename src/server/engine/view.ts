@@ -5,17 +5,27 @@ import { notFound } from "../errors";
 import type { PrismaClient } from "../prisma-client";
 import { priceFor, refusesTrade } from "./commands";
 import { loadSessionContext, npcsReachableFrom, objectiveId } from "./context";
+import { assessHypothesis, visibleLinks } from "./investigation";
 
 /** The player's view of a save game. Only data this player is allowed to see. */
 export async function buildGameView(prisma: PrismaClient, sessionId: string, userId: string, callsign: string): Promise<GameView> {
   const ctx = await loadSessionContext(prisma, sessionId, userId);
   const { content, state } = ctx;
-  const [session, inventory, evidence, events] = await Promise.all([
-    prisma.gameSession.findUniqueOrThrow({ where: { id: sessionId } }),
+  const [session, inventory, evidence, events, hypotheses, caseFile] = await Promise.all([
+    prisma.gameSession.findUniqueOrThrow({ where: { id: sessionId }, include: { simulation: true } }),
     prisma.inventoryItem.findMany({ where: { gameSessionId: sessionId }, orderBy: { acquiredAt: "asc" } }),
     prisma.discoveredEvidence.findMany({ where: { gameSessionId: sessionId }, orderBy: { discoveredAt: "asc" } }),
     prisma.worldEvent.findMany({ where: { gameSessionId: sessionId }, orderBy: { createdAt: "desc" }, take: 25 }),
+    prisma.hypothesis.findMany({ where: { gameSessionId: sessionId }, orderBy: { createdAt: "asc" } }),
+    prisma.caseFile.findUnique({ where: { gameSessionId: sessionId } }),
   ]);
+  const ending = caseFile ? content.endings.find((e) => e.key === caseFile.endingKey) : undefined;
+  const canSubmit =
+    !caseFile &&
+    [...content.quests.values()].some(
+      (q) => state.questStatus.get(q.key) === "ACTIVE" && q.objectives.some((o) => o.kind === "CLOSE_CASE" && !state.objectivesDone.has(objectiveId(q.key, o.key))),
+    );
+  const everyTurns = content.simulation.everyTurns;
   const here = content.locations.get(state.currentLocationKey)!;
 
   const pendingDeliveries = [...content.quests.values()]
@@ -94,6 +104,25 @@ export async function buildGameView(prisma: PrismaClient, sessionId: string, use
     }),
     factions: [...content.factions.values()].map((f) => ({ key: f.key, name: f.name, accent: f.accent, reputation: state.reputations.get(f.key) ?? 0 })),
     events: events.map((e) => ({ id: e.id, title: e.title, description: e.description, severity: e.severity, actor: e.actor, turn: e.turn, createdAt: e.createdAt.toISOString() })),
+    investigation: {
+      suspects: [...content.suspects.values()].map((x) => ({ key: x.key, name: x.name, title: x.title, description: x.description, motive: x.motive })),
+      links: visibleLinks(content, state.evidence).map((l) => ({
+        from: l.fromEvidenceKey,
+        to: (l.toEvidenceKey ?? l.toSuspectKey)!,
+        toType: l.toEvidenceKey ? ("evidence" as const) : ("suspect" as const),
+        relation: l.relation,
+        note: l.note,
+      })),
+      hypotheses: hypotheses.map((h) => ({ id: h.id, suspectKey: h.suspectKey, evidenceKeys: h.evidenceKeys, note: h.note, assessment: assessHypothesis(content, h.suspectKey, h.evidenceKeys) })),
+      canSubmit,
+      ending: caseFile && ending ? { key: ending.key, title: ending.title, description: ending.description, tone: ending.tone, suspectKey: caseFile.suspectKey, evidenceKeys: caseFile.evidenceKeys } : null,
+    },
+    choices: [...state.choices.entries()]
+      .filter(([, option]) => option === null)
+      .map(([key]) => content.choices.get(key)!)
+      .filter(Boolean)
+      .map((c) => ({ key: c.key, title: c.title, prompt: c.prompt, options: c.parsedOptions.map((o) => ({ key: o.key, label: o.label, description: o.description })) })),
+    simulation: { tick: state.tick, paused: session.simulation?.paused ?? false, everyTurns, nextTickInTurns: everyTurns - (state.turn % everyTurns) },
   };
 }
 
