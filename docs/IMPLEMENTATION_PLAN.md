@@ -14,7 +14,7 @@ Three phases, each completed, tested and documented before the next starts. Stat
 | Secrets server-side; authorization on all player state | ✅ | `src/server/auth.ts`, `loadSessionContext` |
 | Deterministic mock provider, clearly labelled | ✅ | `src/server/dialogue/mock.ts`, chat UI label |
 | No hidden chain-of-thought in traces | ✅ | `AgentStep.summary` is a one-line decision summary |
-| LangChain.js / LangGraph.js (current APIs) | ⬜ | Phase 2 |
+| LangChain.js / LangGraph.js (current APIs) | ✅ | `@langchain/langgraph` 1.4, `@langchain/core` 1.2, `@langchain/ollama` 1.3 |
 
 ## Phase 1: the foundation
 
@@ -33,17 +33,24 @@ Three phases, each completed, tested and documented before the next starts. Stat
 | Start, explore, converse, discover a clue, collect an item, update quests, persist, reload | ✅ | covered by `e2e/opening-quest.spec.ts` |
 | Verification: migrations, seed, typecheck, lint, unit, integration, build, Playwright | ✅ | results in `docs/PHASE_STATUS.md` |
 
-## Phase 2: the intelligence (not started)
+## Phase 2: the intelligence
 
-| Requirement | Status |
-|---|---|
-| Provider abstraction (models, structured output, streaming, timeouts, retries, usage, errors, cost estimates); keys server-side; mock kept; no silent fallback | ⬜ |
-| LangGraph graph: validation → state → NPC context → memory retrieval → intent → action plan → policy → engine → response → memory consolidation → traces, with conditional routing | ⬜ |
-| Timeouts, bounded transitions, tool-call limits, token budgets, cancellation, idempotency, checkpoints | ⬜ |
-| Structured personalities (already seeded as `NPC.persona`); behaviour from real state | 🟡 data in place; used by the mock only |
-| pgvector memory: embeddings, semantic retrieval, recency/importance ranking, filtering, provenance, dedup, bounded context, consolidation, deterministic fallback, cross-session and isolation tests | 🟡 storage, dedup, provenance and per-session isolation exist; no embeddings or retrieval yet |
-| Typed Zod tools (`get_inventory`, `inspect_evidence`, `search_known_memories`, `transfer_item`, `transfer_credits`, `unlock_location`, `update_quest`, `change_trust`, `trigger_security_alert`, `record_world_event`) through the engine with explicit permissions | 🟡 effects + policy are the foundation; tool layer not built |
-| AgentDebugger with SSE streaming, filtering, expandable traces | 🟡 runs, steps and tool executions are recorded; no UI or streaming |
+Decision by the owner: **Ollama (local, free) instead of the paid OpenAI/Anthropic APIs**. The
+provider abstraction keeps the same shape, so another provider can be added later.
+
+| Requirement | Status | Notes |
+|---|---|---|
+| Provider abstraction: model selection, structured output, streaming, timeouts, retries, usage, error normalisation, cost estimates; credentials server-side; mock kept; no silent fallback | ✅ | `src/server/ai/`; Ollama + mock; no credentials exist (local); cost estimate 0 (local) |
+| OpenAI and Anthropic | ⛔ | replaced by Ollama at the owner's request |
+| LangGraph graph with the eleven nodes and conditional routing | ✅ | `src/server/agents/npc-turn.ts`; small talk skips plan + policy |
+| Timeouts, bounded transitions, tool-call limits, token budget, cancellation, idempotency | ✅ | per call / per turn timeouts, recursion limit 14, 6 tools, 16k tokens, AbortSignal, idempotency key per turn |
+| Persist checkpoints and execution metadata | ✅ | one `AgentStep` per node with structured data; run metadata on `AgentRun`. No LangGraph checkpointer: a turn is short and not resumed, see PHASE_STATUS |
+| Structured personalities; behaviour from real state; no access to other NPCs' private memories | ✅ | `NPC.persona`, `npc-context.ts`, secrets gated by trust |
+| pgvector memory: embeddings, dimensions, parameterised vector queries, semantic retrieval, recency/importance ranking, NPC + session filtering, provenance, dedup, bounded context, validated consolidation, deterministic fallback | ✅ | `src/server/agents/memory.ts`, `HashEmbedder` |
+| Memories survive restarts and follow the player across investigations; isolation tests | ✅ | integration tests |
+| Typed Zod tools through the engine with explicit permissions; reject unauthorised, malformed, duplicate, impossible calls; no code, SQL, shell or external requests | ✅ | `tools.ts` + `policy.ts`; all ten tools |
+| AgentDebugger: run id, nodes and transitions, status, memories with scores, tool proposals and validated args, policy decisions, results, state changes, tokens, latency, retries and errors, provider and model; expandable, filterable, streaming, empty and error states | ✅ | `agent-debugger.tsx`, SSE |
+| Verification | ✅ | see PHASE_STATUS |
 
 ## Phase 3: the living city (not started)
 
@@ -56,8 +63,7 @@ Three phases, each completed, tested and documented before the next starts. Stat
 | Production hardening review and full test suite | ⬜ |
 | Portfolio release docs, diagram, walkthrough, case study | ⬜ |
 
-## Decisions to make before Phase 2
+## Decisions
 
-- **Model providers.** The plan names OpenAI and Anthropic. Both are paid. A local provider
-  (Ollama) can sit behind the same interface for free, offline play. Which providers to support is
-  the owner's decision; the mock stays for tests either way.
+- **Model providers (2026-10-10):** Ollama only (qwen3:8b for dialogue, nomic-embed-text for
+  memory), free and local. The mock provider stays for tests and offline play.

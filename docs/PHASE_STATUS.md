@@ -3,8 +3,89 @@
 | Phase | Status |
 |---|---|
 | 1. The foundation | ✅ complete and verified on 2026-10-10 |
-| 2. The intelligence | ⬜ waiting for authorization |
-| 3. The living city | ⬜ not started |
+| 2. The intelligence | ✅ complete and verified on 2026-10-10 (with Ollama instead of paid APIs) |
+| 3. The living city | ⬜ waiting for authorization |
+
+## Phase 2: implemented features
+
+- **Local AI**: qwen3:8b for dialogue and nomic-embed-text for memory, both through Ollama
+  (LangChain `ChatOllama` / `OllamaEmbeddings`). Structured output, streaming, real timeouts and
+  cancellation, retries, usage tracking, normalised errors. No API keys; estimated cost 0.
+- **NPC turn graph** (LangGraph): validate → load state → NPC context → memory retrieval →
+  interpret → (plan) → (policy) → execute → respond → consolidate memory → finalize, with
+  conditional routing, recursion limit, timeouts, token budget, tool limit, cancellation and
+  idempotent replay. The engine is the only writer, after the model calls, in one short
+  transaction that re-checks every approved call.
+- **Tools**: ten typed Zod tools on top of the engine effects, explicit per-NPC permissions,
+  rejection of unknown, unauthorised, malformed, duplicate, excessive and impossible calls.
+- **Memory**: pgvector `vector(768)` with HNSW, scoped to player + NPC across investigations,
+  similarity/importance/recency ranking, dedup, bounded context, provenance, graceful degradation
+  when only embeddings fail, deterministic test embedder.
+- **Story rules** that keep the game playable whatever the model proposes; data-driven hints.
+- **UI**: streaming replies with the agent's current step and a stop button, honest labels
+  (*simulated* or *qwen3:8b · local AI*), AI status in the HUD, and the AgentDebugger (live turn
+  and all runs: graph, memories with scores, tool calls and policy, state changes, tokens,
+  retries, errors).
+
+## Phase 2: tests executed (2026-10-10)
+
+| Check | Command | Result |
+|---|---|---|
+| Migrations | `npx prisma migrate status` | 4 migrations, schema up to date |
+| Seed | `npm run db:seed` | scenario v2 published next to v1 |
+| Typecheck / lint | `npm run typecheck`, `npm run lint` | exit 0, no warnings |
+| Unit tests | `npm test` | 33 passed (5 files) |
+| Integration tests | `npm run test:integration` | 26 passed, 1 skipped (the live test) |
+| Live turn with Ollama | `OLLAMA_LIVE=1 npx vitest run --project integration tests/integration/ollama-live.test.ts` | passed: 15.8 s, 3 model calls, 2 201 + 202 tokens; prompt injection refused, credits unchanged |
+| Production build | `npm run build` | exit 0 |
+| End-to-end | `npm run test:e2e` | 5 passed (4 desktop incl. the AgentDebugger, 1 phone) |
+
+Also checked by hand in the browser with qwen3:8b: the full Ghost Courier, the reaction to the
+shard, Kira, VEX-404's alert, recall in a second investigation (4 memories via nomic-embed-text),
+and Ollama unreachable (clear error after 1.9 s, no invented reply, message kept, HUD "AI
+offline").
+
+### Found and fixed by playing with the real model
+
+- The reply described the state before the engine ran ("You got a shard") → written from the
+  state after `execute`; inventory and evidence are spelled out.
+- qwen3 called tools with titles instead of keys (validation correctly refused them) → keys in
+  `[brackets]` in the prompt, exact titles normalised to keys.
+- The embedding client had no timeout and could hang a turn → bound fetch with timeout and
+  cancellation; LangChain's own retries off.
+- `ChatOllama` ignores its abort signal until the first chunk and returns partial output quietly →
+  requests bound to the signal, interrupted calls never accepted.
+- VEX-404 quoted a wrong alert level; Balthazar mixed an earlier case with the present → prompt
+  rules for numbers and earlier-case memories.
+
+## Phase 2: known limitations (non-critical)
+
+- **Speed**: 15–30 s per turn on the development Mac (3 calls to an 8B model). Small talk is faster
+  (2 calls). A smaller or faster model lowers it; the first turn after a pause also loads the model.
+- **The model's judgement varies**: Kira raised her trust for "Balthazar sent me" by 5, not the 25
+  her friend price needs, so the discount isn't reliable with qwen3 (it is with the mock). The
+  quests don't depend on it. NPCs sometimes add colour that isn't in their facts; Phase 3 adds
+  stricter knowledge boundaries for the investigation.
+- **No LangGraph checkpointer**: every node is persisted as an `AgentStep` with its data, but a
+  turn can't be resumed half-way; a failed or cancelled turn is retried as a new turn.
+- **Cancelling after `execute`** keeps the committed state change (it is in the `GameEvent`) and
+  stores no reply.
+- **Reactions to handed-over items** with a model are a separate short run after the give command.
+- Rate limits are still in memory per process.
+
+## Phase 2: outstanding issues
+
+- The `npm audit` findings from Phase 1 (via the Prisma CLI) are unchanged.
+- `prisma migrate dev` proposes dropping the HNSW index (see AGENTS.md).
+
+## Exact next steps (Phase 3, after authorization)
+
+1. Bounded simulation loop (pause / resume / step) for NPC goals and faction reactions.
+2. The Project Genesis investigation: evidence graph, suspects, contradictions, hypotheses,
+   multiple endings, solvable without a given NPC's trust.
+3. Creator Mode with validation and isolated preview.
+4. Debugger: comparison, metrics, retrieval quality, replay.
+5. Hardening review and the portfolio release documents.
 
 ## Phase 1: implemented features
 
@@ -82,7 +163,7 @@ database.
 - npm 11 can drop platform-specific optional packages from the lockfile when packages are added
   or removed (npm/cli#4828); see `AGENTS.md` for the fix.
 
-## Exact next steps (Phase 2, after authorization)
+## Phase 1: next steps at the time (done in Phase 2)
 
 1. Decide the model providers (see "Decisions" in `IMPLEMENTATION_PLAN.md`).
 2. Add the provider abstraction next to the mock, with timeouts, retries, usage tracking and

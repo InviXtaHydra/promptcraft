@@ -24,6 +24,7 @@ changing the engine, and keep `docs/PHASE_STATUS.md` and the checklist in
 | Seed scenario content | `npm run db:seed` (idempotent; never touches player data) |
 | Dev server | `npm run dev` → http://localhost:3100 |
 | Checks | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run build`, `npm run test:e2e` |
+| Live AI check | `OLLAMA_LIVE=1 npx vitest run --project integration tests/integration/ollama-live.test.ts` (needs Ollama) |
 
 ## Non-negotiable rules
 
@@ -39,12 +40,15 @@ changing the engine, and keep `docs/PHASE_STATUS.md` and the checklist in
    Another player's session must look exactly like a missing one (404).
 5. **Honesty about AI.** The mock provider is labelled simulated in the database (`isSimulated`)
    and in the UI. Never present scripted output as model output, and never silently fall back from
-   a real model to the mock.
+   a real model to the mock. A failed model call fails the run; no line is invented.
 6. **No hidden reasoning in traces.** Agent steps store short decision summaries and structured
    data only.
 7. **Secrets stay server-side.** `.env` is git-ignored; `.env.example` holds placeholders only.
    Don't log request bodies, passwords, tokens or cookies.
 8. **Don't claim what you didn't verify.** Run the relevant checks and report their real output.
+9. **Models never run inside a database transaction.** In the NPC turn graph only `execute`
+   writes game state, after the model calls, and it re-checks every approved call.
+10. **Local AI only.** The owner chose Ollama; don't add paid providers without asking.
 
 ## Data
 

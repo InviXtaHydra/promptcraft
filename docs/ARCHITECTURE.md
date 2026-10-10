@@ -5,15 +5,19 @@ renders the game; every rule runs on the server.
 
 ```mermaid
 flowchart LR
-    Browser["Browser<br/>React client components"] -->|"JSON · cookie session · idempotency key"| API["Route Handlers<br/>src/app/api"]
+    Browser["Browser<br/>React client components"] -->|"JSON · SSE · cookie session · idempotency key"| API["Route Handlers<br/>src/app/api"]
     API --> Auth["auth.ts<br/>sessions, Origin check, rate limits"]
     API --> Engine["Game engine<br/>src/server/engine"]
-    Engine --> Policy["policy.ts<br/>what an NPC may propose"]
-    Engine --> Dialogue["DialogueProvider<br/>Phase 1: deterministic mock"]
-    Dialogue -.->|"proposals only"| Policy
-    Policy --> Apply["applyEffects<br/>the only writer"]
+    API --> Graph["NPC turn graph<br/>LangGraph · src/server/agents"]
+    Graph --> Brain["NpcBrain<br/>Ollama qwen3:8b · or deterministic mock"]
+    Graph --> Memory["NPC memory<br/>pgvector · nomic-embed-text"]
+    Graph --> Tools["Tools + policy<br/>Zod · per-NPC permissions"]
+    Brain -.->|"proposals only"| Tools
+    Tools --> Apply["applyEffects<br/>the only writer"]
     Engine --> Apply
     Apply --> DB[("PostgreSQL 16<br/>+ pgvector")]
+    Memory --> DB
+    Brain --> Ollama[["Ollama on this machine"]]
     Content["Scenario content<br/>src/content (Zod)"] -->|"prisma db seed"| DB
 ```
 
@@ -25,7 +29,9 @@ flowchart LR
 | Route Handlers | `src/app/api/**/route.ts` | HTTP only: authenticate, check the Origin on mutations, rate-limit, parse, call the engine, return JSON. `src/server/http.ts` maps errors. |
 | Auth | `src/server/auth.ts` | bcrypt passwords, random 256-bit session tokens in an httpOnly cookie, only the SHA-256 hash stored (`AuthSession`). |
 | Engine | `src/server/engine/` | Commands, effects, quest evaluation, policy, views. Pure server code, testable without HTTP. |
-| Dialogue | `src/server/dialogue/` | The `DialogueProvider` interface and the deterministic mock. |
+| AI providers | `src/server/ai/` | Configuration, the Ollama chat model (LangChain `ChatOllama`), embedders, normalised errors. Local only, no API keys. |
+| Agents | `src/server/agents/` | The LangGraph NPC turn, the `NpcBrain` (Ollama or mock), tools, memory, story rules, traces, runs for the debugger. |
+| Dialogue script | `src/server/dialogue/` | The deterministic mock script (Phase 1), now behind the `MockBrain`. |
 | Content | `src/content/` | The authored scenario as typed data plus its Zod schema and reference validation. |
 | Data | `prisma/` | Schema, migrations, seed. Prisma 7 with the `pg` driver adapter; client generated into `src/generated/prisma`. |
 
@@ -54,9 +60,8 @@ Integrity is enforced twice: by the engine and by the database (unique constrain
 `QuestState` per quest and session, and CHECK constraints for credits ≥ 0, alert 0…5, trust
 −100…100, suspicion 0…100, reputation −100…100, quantity > 0, importance 1…10).
 
-`NPCMemory` already has an `embedding vector` column (pgvector extension created by the first
-migration) plus `contentHash` for deduplication and `provenance`. Phase 2 fixes the dimension
-together with the embedding model and adds an index.
+`NPCMemory` has an `embedding vector(768)` column with an HNSW index (pgvector), plus
+`contentHash` for deduplication and `provenance`; see "NPC memory" below.
 
 ## The engine
 
@@ -104,36 +109,143 @@ state and are completed by the engine only. `DELIVER_ITEM` is completed by the `
 Quests and objectives carry data-driven `onCompleteEffects` (unlock a location, change
 reputation, record a world event or memory), validated when the scenario is seeded.
 
-## NPC turns, policy and traces
+## AI providers (Phase 2)
 
-`talk` runs a fixed pipeline and records it as an `AgentRun` with `AgentStep`s:
-`validate_request → load_state → retrieve_memories → interpret → policy_check → execute → respond`.
+Only local providers exist; there are no API keys anywhere. The choice was the owner's: Ollama
+instead of the paid OpenAI/Anthropic APIs named in the original plan.
 
-- **retrieve_memories**: only this NPC's memories of this player in this save game, ordered by
-  importance (Phase 2: semantic retrieval with pgvector, recency and importance ranking).
-- **interpret**: the dialogue provider returns text, an intent label, a one-line summary and
-  proposed effects. It gets no database access and no other NPC's data.
-- **policy_check** (`policy.ts`): per-NPC `allowedEffects` from the content, plus rules: an NPC
-  only changes its own trust, suspicion and memories, only starts quests it gives, only hands over
-  evidence it holds, only changes its own faction's reputation (±10), raises the alert by at most
-  one level per turn and never lowers it, at most six proposals per turn. Malformed proposals are
-  rejected.
-- **execute**: allowed proposals go through `applyEffects`. Every proposal becomes a
-  `ToolExecution` row: `EXECUTED`, or `REJECTED` with the policy's or the engine's reason.
+| Setting | Values |
+|---|---|
+| `DIALOGUE_PROVIDER` | `ollama` (qwen3:8b through Ollama) or `mock` (deterministic script, labelled simulated) |
+| `EMBEDDING_PROVIDER` | `ollama` (nomic-embed-text, 768 dimensions) or `hash` (deterministic test embedder, 768 dimensions) |
 
-Steps store short summaries and structured data, never hidden reasoning.
+`OllamaChatModel` (`src/server/ai/chat-model.ts`) wraps LangChain's `ChatOllama`:
 
-## Dialogue providers
+- **Structured output** through Ollama's JSON-schema `format`, parsed with Zod; one repair round
+  when the JSON doesn't match, then `bad_output`.
+- **Streaming** text with any `<think>` block held back (thinking mode is off; its text must never
+  reach players or traces).
+- **Timeouts and cancellation** that really stop the HTTP request. `ChatOllama` only checks its
+  signal between streamed chunks, so the client gets a `fetch` bound to a per-call timeout and the
+  caller's signal; a call that was interrupted never counts as complete, even if LangChain returned
+  partial output quietly.
+- **Retries** for transient errors (connection refused, 5xx), counted in the trace. LangChain's own
+  retries are off so they can't hide behind ours or outlast the timeout.
+- **Usage** from Ollama's token counts. The estimated cost is 0 (local), always shown as an estimate.
+- **Errors** normalised to `ProviderError` (`unreachable`, `model_missing`, `timeout`, `cancelled`,
+  `bad_output`, `provider_error`) with a player-facing message for each.
 
-`DialogueProvider` (`src/server/dialogue/types.ts`) has `reply`, `reactToItem` and `suggestions`.
-Phase 1 ships only `mockDialogueProvider`: a keyword-and-state script per NPC, deterministic (the
-same state and message give the same reply), `isSimulated: true`. Every NPC message stores its
-provider and `isSimulated`, and the UI labels the conversation and each simulated line.
-`getDialogueProvider` fails loudly for any provider other than `mock` instead of falling back.
+A failed model call is never replaced by made-up output: the run fails, the player sees why, and
+no NPC line is stored.
 
-Phase 2 note: a model call must not hold the database transaction open. The plan is to split the
-turn into a read phase (context, memories), the model call, and a short write transaction
-(policy + `applyEffects`), keeping the same trace.
+## The NPC turn graph (Phase 2)
+
+`runNpcTurn` (`src/server/agents/npc-turn.ts`) is a LangGraph `StateGraph`:
+
+```text
+validate_request → load_state → build_npc_context → retrieve_memories → interpret
+  ├─ needs action ──────────────→ plan → policy_check ─┐
+  ├─ only story rules apply ─────────→ policy_check ───┤
+  └─ small talk ─────────────────────────────────────→ execute → respond → consolidate_memory → finalize
+```
+
+- **validate_request** (before the graph): input schema, ownership, NPC reachable, idempotency.
+  A repeated key replays the stored reply; a key in progress is refused. The player message and
+  an `AgentRun` (status RUNNING) are stored in one short transaction.
+- **build_npc_context**: what this NPC may know (`npc-context.ts`): its persona, secrets only above
+  their trust threshold, this player's standing, the parts of the state that concern it (with
+  content keys in `[brackets]`), the conversation, its permitted tools and story hints. Never
+  other NPCs' memories or private data.
+- **interpret**: one small structured call (intent, topics, needsAction, notable, memoryNote).
+- **plan** (conditional): one structured call proposing tool calls. Skipped when the token
+  budget would be exceeded; story rules still apply.
+- **policy_check**: every call is checked (see Tools). Read tools run here.
+- **execute**: the only node that changes game state, in one short transaction with the row lock,
+  after re-checking every approved call against the state at that moment (the model may have
+  thought for 20 seconds). Then quests are evaluated, the turn counter rises and the `GameEvent` is
+  written under the turn's idempotency key.
+- **respond**: the reply, streamed, written from the state *after* the engine ran, so the NPC can't
+  claim something that didn't happen. Rejected actions are listed as "considered but not done".
+- **consolidate_memory**: validated, deduplicated memories (see Memory).
+
+Bounds: LangGraph recursion limit (14 transitions), per-call timeout (90 s), per-turn timeout
+(180 s), token budget (16 000 per turn), at most 6 tool calls per turn, cancellation through the
+request's AbortSignal (closing the stream cancels the turn; before `execute` nothing changes).
+
+Model calls happen outside any database transaction. Measured with qwen3:8b on the development
+Mac: about 15–25 s per turn with three model calls (interpret, plan, respond), about 2 200 input
+and 200 output tokens; small talk skips the plan call.
+
+### Story rules
+
+`story-hooks.ts` computes, from the game state, what keeps the story playable regardless of what
+the model proposes: the quest giver always offers its quest on first contact, and bringing up a
+piece of evidence you hold completes the matching "ask about" objective. These calls go through
+the same checks, marked `story-rule` in the trace. Other situations become *hints* the model may
+act on (a friend price and its trust threshold, a delivery the NPC is waiting for).
+
+### The mock brain
+
+`MockBrain` puts the Phase 1 script behind the same `NpcBrain` interface: the script's proposals
+become tool calls, its line is streamed word by word, and everything is labelled simulated. It is
+stateless (the line decided at the start of the turn travels in the interpretation), so one
+instance can serve concurrent turns. Tests and CI use it with the hashing embedder.
+
+## Tools
+
+`src/server/agents/tools.ts` defines ten typed tools. Read: `get_inventory`, `inspect_evidence`,
+`search_known_memories`. State-changing: `transfer_item`, `transfer_credits`, `unlock_location`,
+`update_quest`, `change_trust`, `change_reputation`, `trigger_security_alert`,
+`record_world_event`. A state-changing tool only translates its arguments into engine effects.
+
+Each call is checked in order, and every rejection is recorded with its reason:
+
+1. known tool name;
+2. permitted for this NPC (`NPC.allowedTools`, from the scenario);
+3. arguments valid against the tool's strict Zod schema (exact titles from this scenario are first
+   normalised to their keys, which small models tend to use instead);
+4. not a duplicate of an earlier call in the turn;
+5. within six calls per turn;
+6. the resulting effects allowed by the NPC policy (`policy.ts`), plus per-turn totals: the alert
+   rises at most one level, trust and suspicion change by at most 25.
+
+Credits, items and locations are engine-only in the policy, so even a tool an NPC is permitted to
+use can't move money. No tool runs code, builds SQL or makes network requests.
+
+## NPC memory (pgvector)
+
+`NPCMemory` belongs to one player and one NPC (by key) and follows the player across
+investigations; `gameSessionId` records where it was formed. Embeddings are `vector(768)` with an
+HNSW cosine index; `embeddingModel` is stored with each vector and retrieval only compares vectors
+from the same model.
+
+- **Retrieval** (`memory.ts`): a parameterised query (`$queryRaw` with the vector as a bound
+  parameter) filtered on player, NPC and embedding model in the WHERE clause, 24 nearest
+  neighbours, re-ranked by `0.55·similarity + 0.25·importance/10 + 0.15·recency + 0.05·this
+  investigation` (recency halves every 72 h), then the top 5 within 1 200 characters.
+- **Consolidation**: at most two new memories per turn, 8–300 characters, deduplicated by content
+  hash and by vector similarity ≥ 0.92, with provenance `run:<id>`. Engine memories (story beats)
+  are written in the transaction without a vector and embedded afterwards.
+- **Degradation**: if only the embedder fails, the NPC answers without memories, the trace says
+  so, and new memories wait for their vector until a later turn.
+- **Isolation**: another player's or another NPC's memories are never part of a query. Tests cover
+  recall across investigations and both kinds of isolation.
+
+## Observability
+
+Every turn is an `AgentRun` with an `AgentStep` per node (status, duration, a one-line summary and
+structured data, never hidden reasoning) and a `ToolExecution` per proposed call (validated
+arguments, EXECUTED or REJECTED with the reason, result). Runs record provider, model, simulated
+or not, tokens, model calls, retries, transitions, latency and the estimated cost.
+
+- `POST /api/sessions/{id}/talk` streams the turn as Server-Sent Events (`run_started`, `node`,
+  `memories`, `tool`, `outcome`, `delta`, `usage`, `view`, `done` or `error`).
+- `GET /api/sessions/{id}/runs` (filters: NPC, status) and `GET /api/sessions/{id}/runs/{runId}`
+  feed the AgentDebugger. Both resolve the session through the signed-in player: someone else's
+  runs are "not found".
+- The AgentDebugger (side panel in the game) shows the live turn as it streams and every run:
+  graph steps with timings, recalled memories with similarity and score, tool calls with arguments,
+  policy decisions and results, the database changes, tokens, retries and errors.
 
 ## Security
 
@@ -154,10 +266,17 @@ Redis); there is no password reset or email verification yet.
 ## Testing
 
 - **Unit** (`tests/unit`): mock provider determinism and rules, the NPC policy, effect validation,
-  scenario reference validation. No database.
+  scenario reference validation, the Ollama client against a fake Ollama server (structured
+  output, repair, retries, timeouts, unreachable, missing model, streaming, cancellation, the
+  embedder's timeout), tool checks, memory ranking and the test embedder. No database.
 - **Integration** (`tests/integration`): the engine against the real `promptcraft_test` database:
   the full opening walkthrough, idempotency, simultaneous deliveries, locked locations, credits,
-  alert bounds, trade refusal, cross-player isolation, memory isolation, agent-run recording.
+  alert bounds, trade refusal, cross-player isolation, memory isolation, agent-run recording; and
+  the agent graph: routing, story rules, streaming order, rejected tool calls, replay, provider
+  failure, cancellation, token budget, recall across investigations, player and NPC isolation,
+  embedder failure, trace authorization.
+- **Live** (`tests/integration/ollama-live.test.ts`, only with `OLLAMA_LIVE=1`): a real turn with
+  qwen3:8b and nomic-embed-text, including a prompt-injection attempt.
 - **End-to-end** (`e2e/`): Playwright against a production build (`next start`) on the test
-  database: both quests in a browser, persistence after reload, sign-in redirects, a foreign game,
-  the phone layout.
+  database (mock brain): both quests in a browser, persistence after reload, sign-in redirects, a
+  foreign game, the phone layout, the AgentDebugger.
