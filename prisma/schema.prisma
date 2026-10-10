@@ -1,0 +1,738 @@
+// PromptCraft: Neon-Babylon 2099
+//
+// Two kinds of data live here:
+// - Scenario content (Scenario → ScenarioVersion → Location, NPC, ItemDefinition, Quest, Evidence, …):
+//   the authored world, shared by every player and never changed by gameplay.
+// - Player state (User → GameSession → WorldState, InventoryItem, QuestState, …): one save game per
+//   GameSession, owned by exactly one user. The game engine is the only writer.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Accounts ──────────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  PLAYER
+  CREATOR
+  ADMIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         UserRole @default(PLAYER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  profile      PlayerProfile?
+  authSessions AuthSession[]
+  gameSessions GameSession[]
+  agentRuns    AgentRun[]
+  auditLogs    AuditLog[]
+  scenarios    Scenario[]     @relation("ScenarioAuthor")
+}
+
+/// A signed-in browser. Only the SHA-256 hash of the cookie token is stored.
+model AuthSession {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PlayerProfile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  callsign  String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─── Scenario content ──────────────────────────────────────────────────────────────────────────
+
+enum ScenarioVersionStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model Scenario {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  title     String
+  summary   String
+  authorId  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  author   User?             @relation("ScenarioAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  versions ScenarioVersion[]
+}
+
+/// An immutable snapshot of a scenario. Game sessions pin the version they started on, so editing a
+/// scenario later (Creator Mode, Phase 3) never changes a running save game.
+model ScenarioVersion {
+  id              String                @id @default(cuid())
+  scenarioId      String
+  version         Int
+  status          ScenarioVersionStatus @default(DRAFT)
+  publishedAt     DateTime?
+  /// Starting state of every new save game on this version
+  startingCredits Int                   @default(0)
+  /// [{ itemKey, quantity }]
+  startingItems   Json                  @default("[]")
+  createdAt       DateTime              @default(now())
+
+  scenario     Scenario         @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  locations    Location[]
+  factions     Faction[]
+  npcs         NPC[]
+  items        ItemDefinition[]
+  quests       Quest[]
+  evidence     Evidence[]
+  gameSessions GameSession[]
+
+  @@unique([scenarioId, version])
+  @@index([scenarioId, status])
+}
+
+model Location {
+  id                String  @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  name              String
+  district          String
+  description       String
+  ambience          String
+  /// Accent colour for the location art (hex)
+  accent            String
+  sortOrder         Int     @default(0)
+  isStartingPoint   Boolean @default(false)
+  /// Locked locations need a LocationAccess row for the session before the player can travel there
+  startsUnlocked    Boolean @default(false)
+  lockedReason      String?
+
+  scenarioVersion ScenarioVersion  @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+  npcs            NPC[]
+  evidence        Evidence[]
+  loot            LocationLoot[]
+  access          LocationAccess[]
+  currentFor      WorldState[]
+
+  @@unique([scenarioVersionId, key])
+}
+
+model Faction {
+  id                String @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  name              String
+  description       String
+  accent            String
+
+  scenarioVersion ScenarioVersion     @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+  npcs            NPC[]
+  reputations     FactionReputation[]
+
+  @@unique([scenarioVersionId, key])
+}
+
+model NPC {
+  id                String   @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  name              String
+  title             String
+  shortBio          String
+  accent            String
+  locationId        String
+  /// NPCs that can also be reached from other locations (e.g. VEX-404's public relay), by location key
+  reachableFrom     String[]
+  factionId         String?
+  baseTrust         Int      @default(0)
+  baseSuspicion     Int      @default(0)
+  /// Effect types this NPC may propose; the engine rejects anything else (see src/server/engine/policy.ts)
+  allowedEffects    String[]
+  /// Structured character definition (personality, goals, known facts, secrets, …), used by the AI in Phase 2
+  persona           Json
+
+  scenarioVersion ScenarioVersion   @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+  location        Location          @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  faction         Faction?          @relation(fields: [factionId], references: [id], onDelete: SetNull)
+  relationships   NPCRelationship[]
+  conversations   Conversation[]
+  memories        NPCMemory[]
+  questsGiven     Quest[]
+  offers          MerchantOffer[]
+  sourceOf        Evidence[]
+  agentRuns       AgentRun[]
+
+  @@unique([scenarioVersionId, key])
+}
+
+enum ItemKind {
+  TOOL
+  DATA
+  KEYCARD
+  CONSUMABLE
+  MISC
+}
+
+enum ItemRarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+model ItemDefinition {
+  id                String     @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  name              String
+  description       String
+  kind              ItemKind
+  rarity            ItemRarity @default(COMMON)
+  baseValue         Int        @default(0)
+  stackable         Boolean    @default(false)
+
+  scenarioVersion ScenarioVersion @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+  inventory       InventoryItem[]
+  loot            LocationLoot[]
+  offers          MerchantOffer[]
+
+  @@unique([scenarioVersionId, key])
+}
+
+/// Items lying around a location, found by investigating it (once per session).
+model LocationLoot {
+  id               String @id @default(cuid())
+  locationId       String
+  itemDefinitionId String
+  quantity         Int    @default(1)
+  /// What the player sees when finding it
+  foundText        String
+
+  location       Location        @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  itemDefinition ItemDefinition  @relation(fields: [itemDefinitionId], references: [id], onDelete: Cascade)
+  collected      CollectedLoot[]
+
+  @@unique([locationId, itemDefinitionId])
+}
+
+/// Items an NPC sells. Prices are server-side; a trusted player gets the discount price.
+model MerchantOffer {
+  id               String @id @default(cuid())
+  npcId            String
+  itemDefinitionId String
+  price            Int
+  discountPrice    Int?
+  discountMinTrust Int?
+  stock            Int    @default(1)
+
+  npc            NPC            @relation(fields: [npcId], references: [id], onDelete: Cascade)
+  itemDefinition ItemDefinition @relation(fields: [itemDefinitionId], references: [id], onDelete: Cascade)
+
+  @@unique([npcId, itemDefinitionId])
+}
+
+enum ObjectiveKind {
+  TALK_TO
+  VISIT_LOCATION
+  DISCOVER_EVIDENCE
+  COLLECT_ITEM
+  DELIVER_ITEM
+  ASK_ABOUT
+}
+
+model Quest {
+  id                String  @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  title             String
+  summary           String
+  giverNpcId        String?
+  sortOrder         Int     @default(0)
+  isMain            Boolean @default(true)
+  /// Quest that must be completed before this one can start (by key)
+  requiresQuestKey  String?
+  rewardCredits     Int     @default(0)
+  rewardItemKey     String?
+  rewardText        String?
+  /// Starts by itself as soon as requiresQuestKey is completed
+  autoStart         Boolean @default(false)
+  /// Extra engine effects applied once when the quest completes (validated, see src/server/engine/effects.ts)
+  onCompleteEffects Json    @default("[]")
+
+  scenarioVersion ScenarioVersion  @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+  giver           NPC?             @relation(fields: [giverNpcId], references: [id], onDelete: SetNull)
+  objectives      QuestObjective[]
+  states          QuestState[]
+
+  @@unique([scenarioVersionId, key])
+}
+
+model QuestObjective {
+  id                String        @id @default(cuid())
+  questId           String
+  key               String
+  description       String
+  kind              ObjectiveKind
+  /// Key of the NPC, location, evidence or item the objective is about
+  targetKey         String
+  /// For DELIVER_ITEM: the NPC that receives the item
+  recipientKey      String?
+  optional          Boolean       @default(false)
+  sortOrder         Int           @default(0)
+  /// Engine effects applied once when this objective is completed
+  onCompleteEffects Json          @default("[]")
+
+  quest    Quest               @relation(fields: [questId], references: [id], onDelete: Cascade)
+  progress ObjectiveProgress[]
+
+  @@unique([questId, key])
+}
+
+enum EvidenceReliability {
+  CONFIRMED
+  LIKELY
+  UNVERIFIED
+  DISPUTED
+}
+
+model Evidence {
+  id                String              @id @default(cuid())
+  scenarioVersionId String
+  key               String
+  title             String
+  description       String
+  /// Found by investigating this location …
+  locationId        String?
+  /// … or handed over by this NPC
+  sourceNpcId       String?
+  reliability       EvidenceReliability @default(UNVERIFIED)
+  tags              String[]
+
+  scenarioVersion ScenarioVersion      @relation(fields: [scenarioVersionId], references: [id], onDelete: Cascade)
+  location        Location?            @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  sourceNpc       NPC?                 @relation(fields: [sourceNpcId], references: [id], onDelete: SetNull)
+  discoveries     DiscoveredEvidence[]
+
+  @@unique([scenarioVersionId, key])
+}
+
+// ─── Player state (one save game = one GameSession) ────────────────────────────────────────────
+
+enum GameSessionStatus {
+  ACTIVE
+  COMPLETED
+  ABANDONED
+}
+
+model GameSession {
+  id                String            @id @default(cuid())
+  userId            String
+  scenarioVersionId String
+  status            GameSessionStatus @default(ACTIVE)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  lastPlayedAt      DateTime          @default(now())
+
+  user               User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scenarioVersion    ScenarioVersion      @relation(fields: [scenarioVersionId], references: [id], onDelete: Restrict)
+  worldState         WorldState?
+  locationAccess     LocationAccess[]
+  relationships      NPCRelationship[]
+  reputations        FactionReputation[]
+  inventory          InventoryItem[]
+  collectedLoot      CollectedLoot[]
+  questStates        QuestState[]
+  objectiveProgress  ObjectiveProgress[]
+  discoveredEvidence DiscoveredEvidence[]
+  conversations      Conversation[]
+  worldEvents        WorldEvent[]
+  gameEvents         GameEvent[]
+  memories           NPCMemory[]
+  agentRuns          AgentRun[]
+
+  @@index([userId, lastPlayedAt])
+}
+
+model WorldState {
+  id                String   @id @default(cuid())
+  gameSessionId     String   @unique
+  credits           Int
+  currentLocationId String
+  /// 0 (calm) … 5 (lockdown)
+  securityAlert     Int      @default(0)
+  /// Increases with every accepted command; used for ordering and simple time-based rules
+  turn              Int      @default(0)
+  updatedAt         DateTime @updatedAt
+
+  gameSession     GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  currentLocation Location    @relation(fields: [currentLocationId], references: [id], onDelete: Restrict)
+}
+
+model LocationAccess {
+  id             String    @id @default(cuid())
+  gameSessionId  String
+  locationId     String
+  unlockedAt     DateTime  @default(now())
+  visitedAt      DateTime?
+  investigatedAt DateTime?
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  location    Location    @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, locationId])
+}
+
+model NPCRelationship {
+  id                String    @id @default(cuid())
+  gameSessionId     String
+  npcId             String
+  /// -100 … 100
+  trust             Int
+  /// 0 … 100
+  suspicion         Int
+  lastInteractionAt DateTime?
+  updatedAt         DateTime  @updatedAt
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  npc         NPC         @relation(fields: [npcId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, npcId])
+}
+
+model FactionReputation {
+  id            String   @id @default(cuid())
+  gameSessionId String
+  factionId     String
+  /// -100 … 100
+  reputation    Int      @default(0)
+  updatedAt     DateTime @updatedAt
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  faction     Faction     @relation(fields: [factionId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, factionId])
+}
+
+model InventoryItem {
+  id               String   @id @default(cuid())
+  gameSessionId    String
+  itemDefinitionId String
+  quantity         Int
+  /// Where it came from, e.g. "start", "loot:neon-slums", "reward:ghost-courier", "bought:kira"
+  source           String
+  acquiredAt       DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  gameSession    GameSession    @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  itemDefinition ItemDefinition @relation(fields: [itemDefinitionId], references: [id], onDelete: Restrict)
+
+  @@unique([gameSessionId, itemDefinitionId])
+}
+
+model CollectedLoot {
+  id            String   @id @default(cuid())
+  gameSessionId String
+  lootId        String
+  collectedAt   DateTime @default(now())
+
+  gameSession GameSession  @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  loot        LocationLoot @relation(fields: [lootId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, lootId])
+}
+
+enum QuestStatus {
+  ACTIVE
+  COMPLETED
+  FAILED
+}
+
+model QuestState {
+  id              String      @id @default(cuid())
+  gameSessionId   String
+  questId         String
+  status          QuestStatus @default(ACTIVE)
+  startedAt       DateTime    @default(now())
+  completedAt     DateTime?
+  /// Set in the same transaction as the reward, so a reward can only be granted once
+  rewardGrantedAt DateTime?
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  quest       Quest       @relation(fields: [questId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, questId])
+}
+
+model ObjectiveProgress {
+  id            String   @id @default(cuid())
+  gameSessionId String
+  objectiveId   String
+  completedAt   DateTime @default(now())
+
+  gameSession GameSession    @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  objective   QuestObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, objectiveId])
+}
+
+model DiscoveredEvidence {
+  id            String   @id @default(cuid())
+  gameSessionId String
+  evidenceId    String
+  discoveredAt  DateTime @default(now())
+  /// How the player got it, e.g. "investigated:neon-slums" or "given-by:balthazar"
+  provenance    String
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  evidence    Evidence    @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, evidenceId])
+}
+
+// ─── Conversations ─────────────────────────────────────────────────────────────────────────────
+
+enum MessageRole {
+  PLAYER
+  NPC
+  SYSTEM
+}
+
+model Conversation {
+  id            String   @id @default(cuid())
+  gameSessionId String
+  npcId         String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  npc         NPC         @relation(fields: [npcId], references: [id], onDelete: Cascade)
+  messages    Message[]
+
+  @@unique([gameSessionId, npcId])
+}
+
+model Message {
+  id             String      @id @default(cuid())
+  conversationId String
+  role           MessageRole
+  content        String
+  /// "mock" for the deterministic development provider; real provider ids from Phase 2
+  provider       String?
+  /// True when the text was produced by the deterministic mock, never by a language model
+  isSimulated    Boolean     @default(false)
+  agentRunId     String?
+  createdAt      DateTime    @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  agentRun     AgentRun?    @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+}
+
+// ─── Events ────────────────────────────────────────────────────────────────────────────────────
+
+enum EventActor {
+  PLAYER
+  NPC
+  SYSTEM
+}
+
+enum WorldEventSeverity {
+  INFO
+  NOTICE
+  WARNING
+  CRITICAL
+}
+
+/// Something that happened in the city, shown in the player's event feed.
+model WorldEvent {
+  id            String             @id @default(cuid())
+  gameSessionId String
+  key           String?
+  title         String
+  description   String
+  severity      WorldEventSeverity @default(INFO)
+  actor         EventActor
+  actorNpcId    String?
+  turn          Int
+  createdAt     DateTime           @default(now())
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+
+  /// A keyed world event (e.g. a story beat) happens at most once per session
+  @@unique([gameSessionId, key])
+  @@index([gameSessionId, createdAt])
+}
+
+/// The engine's log: one row per accepted command, with the effects it applied. The idempotency key
+/// makes retries safe: the same key returns the stored result instead of running again.
+model GameEvent {
+  id             String     @id @default(cuid())
+  gameSessionId  String
+  type           String
+  actor          EventActor
+  idempotencyKey String
+  turn           Int
+  payload        Json
+  result         Json
+  createdAt      DateTime   @default(now())
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, idempotencyKey])
+  @@index([gameSessionId, createdAt])
+}
+
+// ─── NPC memory (pgvector-ready) ───────────────────────────────────────────────────────────────
+
+enum MemoryKind {
+  EPISODIC
+  SEMANTIC
+  RELATIONSHIP
+  PROMISE
+  BETRAYAL
+  EVIDENCE
+  NEGOTIATION
+}
+
+/// What an NPC remembers about this player in this session. Phase 1 writes memories for story beats
+/// deterministically; Phase 2 adds embeddings (pgvector) and semantic retrieval.
+model NPCMemory {
+  id             String                 @id @default(cuid())
+  gameSessionId  String
+  npcId          String
+  kind           MemoryKind
+  content        String
+  /// 1 (trivial) … 10 (life-changing)
+  importance     Int
+  /// SHA-256 of the normalised content, for deduplication
+  contentHash    String
+  /// Where the memory came from, e.g. "event:<GameEvent id>"
+  provenance     String
+  /// pgvector column; dimension is fixed in Phase 2 together with the embedding model
+  embedding      Unsupported("vector")?
+  embeddingModel String?
+  createdAt      DateTime               @default(now())
+  lastRecalledAt DateTime?
+
+  gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  npc         NPC         @relation(fields: [npcId], references: [id], onDelete: Cascade)
+
+  @@unique([gameSessionId, npcId, contentHash])
+  @@index([gameSessionId, npcId, createdAt])
+}
+
+// ─── Agent observability ───────────────────────────────────────────────────────────────────────
+
+enum RunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+/// One NPC turn: from the player's message to the NPC's reply, including proposed and executed effects.
+model AgentRun {
+  id            String    @id @default(cuid())
+  gameSessionId String
+  userId        String
+  npcId         String?
+  provider      String
+  model         String
+  isSimulated   Boolean
+  status        RunStatus @default(RUNNING)
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+  latencyMs     Int?
+  inputTokens   Int?
+  outputTokens  Int?
+  error         String?
+
+  gameSession GameSession     @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  npc         NPC?            @relation(fields: [npcId], references: [id], onDelete: SetNull)
+  steps       AgentStep[]
+  tools       ToolExecution[]
+  messages    Message[]
+
+  @@index([gameSessionId, startedAt])
+  @@index([userId, startedAt])
+}
+
+model AgentStep {
+  id         String    @id @default(cuid())
+  runId      String
+  index      Int
+  node       String
+  status     RunStatus
+  /// A short, human-readable decision summary (never hidden reasoning)
+  summary    String
+  data       Json?
+  startedAt  DateTime  @default(now())
+  durationMs Int?
+
+  run   AgentRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  tools ToolExecution[]
+
+  @@unique([runId, index])
+}
+
+enum ToolStatus {
+  PROPOSED
+  REJECTED
+  EXECUTED
+  FAILED
+}
+
+model ToolExecution {
+  id              String     @id @default(cuid())
+  runId           String
+  stepId          String?
+  toolName        String
+  arguments       Json
+  status          ToolStatus
+  result          Json?
+  rejectionReason String?
+  createdAt       DateTime   @default(now())
+
+  run  AgentRun   @relation(fields: [runId], references: [id], onDelete: Cascade)
+  step AgentStep? @relation(fields: [stepId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  targetType String?
+  targetId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+}
