@@ -24,6 +24,6 @@ export default defineConfig({
     url: `http://localhost:${PORT}`,
     reuseExistingServer: !process.env.CI,
     timeout: 240_000,
-    env: { DATABASE_URL: testDatabaseUrl(), DIALOGUE_PROVIDER: "mock" },
+    env: { DATABASE_URL: testDatabaseUrl(), DIALOGUE_PROVIDER: "mock", EMBEDDING_PROVIDER: "hash" },
   },
 });

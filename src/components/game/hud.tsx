@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { motion, useReducedMotion } from "motion/react";
-import { Coins, Gauge, MapPin, ShieldAlert } from "lucide-react";
-import type { GameView } from "@/lib/game-types";
+import { Bug, Coins, Cpu, FlaskConical, Gauge, MapPin, ShieldAlert } from "lucide-react";
+import type { AiStatusView, GameView } from "@/lib/game-types";
 import { cn } from "@/lib/utils";
 
 const ALERT_WORDS = ["Calm", "Watched", "Noticed", "Hunted", "Hot", "Lockdown"];
@@ -22,7 +22,28 @@ export function AlertMeter({ level }: { level: number }) {
   );
 }
 
-export function Hud({ view }: { view: GameView }) {
+function AiBadge({ ai }: { ai: AiStatusView | null }) {
+  if (!ai) return null;
+  if (ai.dialogue.simulated) {
+    return (
+      <span className="hidden items-center gap-1 rounded border border-amber/40 px-1.5 py-0.5 font-mono text-[0.7rem] text-amber sm:inline-flex" title="NPCs speak from a deterministic script (DIALOGUE_PROVIDER=mock)">
+        <FlaskConical className="size-3" aria-hidden="true" /> scripted NPCs
+      </span>
+    );
+  }
+  const ready = ai.ollama?.reachable && ai.ollama.chatModelInstalled && ai.ollama.embedModelInstalled;
+  const problem = !ai.ollama?.reachable ? "Ollama isn't running" : !ai.ollama.chatModelInstalled ? `${ai.dialogue.model} isn't installed` : `${ai.embeddings.model} isn't installed`;
+  return (
+    <span
+      className={cn("inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[0.7rem]", ready ? "border-cyan/40 text-cyan" : "border-danger/60 text-danger")}
+      title={ready ? `NPCs are voiced by ${ai.dialogue.model} in Ollama; memories use ${ai.embeddings.model}` : `Local AI not ready: ${problem}`}
+    >
+      <Cpu className="size-3" aria-hidden="true" /> {ready ? ai.dialogue.model : "AI offline"}
+    </span>
+  );
+}
+
+export function Hud({ view, ai, onOpenDebugger }: { view: GameView; ai: AiStatusView | null; onOpenDebugger: () => void }) {
   const reduce = useReducedMotion();
   return (
     <header className="sticky top-0 z-30 border-b border-line bg-ink/90 backdrop-blur">
@@ -51,7 +72,16 @@ export function Hud({ view }: { view: GameView }) {
           <span className="hidden items-center gap-1.5 font-mono text-xs text-dim lg:inline-flex" aria-label={`Turn ${view.session.turn}`}>
             <Gauge className="size-3.5" aria-hidden="true" /> T{view.session.turn}
           </span>
-          <span className="hidden font-mono text-xs text-cyan md:inline">{view.player.callsign}</span>
+          <AiBadge ai={ai} />
+          <button
+            type="button"
+            onClick={onOpenDebugger}
+            className="inline-flex items-center gap-1.5 rounded border border-line px-2 py-1 text-xs text-dim transition-colors hover:border-cyan/60 hover:text-text"
+          >
+            <Bug className="size-3.5" aria-hidden="true" /> <span className="hidden sm:inline">Agent debugger</span>
+            <span className="sr-only sm:hidden">Agent debugger</span>
+          </button>
+          <span className="hidden font-mono text-xs text-cyan xl:inline">{view.player.callsign}</span>
         </div>
       </div>
     </header>

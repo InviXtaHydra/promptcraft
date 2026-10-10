@@ -2,13 +2,15 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, Building2, MessagesSquare } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError, newActionKey } from "@/lib/api-client";
-import type { CommandResponse, ConversationView, GameView } from "@/lib/game-types";
+import type { AiStatusView, CommandResponse, ConversationView, GameView, TurnStreamEvent } from "@/lib/game-types";
+import { streamTurn } from "@/lib/turn-stream";
 import { cn } from "@/lib/utils";
-import { ChatTerminal } from "./chat-terminal";
+import { AgentDebugger } from "./agent-debugger";
+import { ChatTerminal, type LiveTurnView } from "./chat-terminal";
 import { CityPanel } from "./city-panel";
 import { Hud } from "./hud";
 import { EventFeed, Journal } from "./journal";
@@ -18,11 +20,24 @@ import { useAuthRedirect } from "./use-auth-redirect";
 export type Command =
   | { type: "travel"; locationKey: string }
   | { type: "investigate" }
-  | { type: "talk"; npcKey: string; message: string }
   | { type: "give"; npcKey: string; itemKey: string }
   | { type: "buy"; npcKey: string; itemKey: string };
 
 type Tab = "city" | "talk" | "journal";
+
+/** What the chat shows while the agent is in a graph node */
+const ACTIVITY: Record<string, string> = {
+  load_state: "Reading the situation…",
+  build_npc_context: "Reading the situation…",
+  retrieve_memories: "Remembering…",
+  interpret: "Listening…",
+  plan: "Deciding what to do…",
+  policy_check: "Checking the rules…",
+  execute: "Acting…",
+  respond: "Answering…",
+  consolidate_memory: "Taking it in…",
+};
+
 
 export function GameClient() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -34,6 +49,21 @@ export function GameClient() {
   const [busy, setBusy] = useState(false);
   const [narration, setNarration] = useState<string[]>([]);
   const [tab, setTab] = useState<Tab>("city");
+  const [live, setLive] = useState<LiveTurnView | null>(null);
+  const [liveEvents, setLiveEvents] = useState<TurnStreamEvent[]>([]);
+  const [debuggerOpen, setDebuggerOpen] = useState(false);
+  const [runsVersion, setRunsVersion] = useState(0);
+  const [conversationVersion, setConversationVersion] = useState(0);
+  const [ai, setAi] = useState<AiStatusView | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api<{ status: AiStatusView }>("/api/ai/status", { signal: controller.signal })
+      .then((r) => setAi(r.status))
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -55,12 +85,55 @@ export function GameClient() {
     if (!npcKey) return;
     const controller = new AbortController();
     api<{ conversation: ConversationView }>(`/api/sessions/${sessionId}/conversations/${npcKey}`, { signal: controller.signal })
-      .then((res) => setConversation(res.conversation))
+      .then((res) => {
+        setConversation(res.conversation);
+        // The streamed turn is now part of the stored conversation
+        setLive((current) => (current && !current.active && !current.error ? null : current));
+      })
       .catch((e) => {
         if (!controller.signal.aborted) toLogin(e);
       });
     return () => controller.abort();
-  }, [sessionId, npcKey, turn, toLogin]);
+  }, [sessionId, npcKey, turn, conversationVersion, toLogin]);
+
+
+  const say = useCallback(
+    async (key: string, message: string): Promise<boolean> => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setBusy(true);
+      setLiveEvents([]);
+      setLive({ player: message, reply: "", activity: "Connecting…", error: null, active: true });
+      setTab("talk");
+      let failed: string | null = null;
+      try {
+        await streamTurn(
+          sessionId,
+          { npcKey: key, message, idempotencyKey: newActionKey() },
+          (event) => {
+            setLiveEvents((prev) => [...prev, event]);
+            if (event.type === "node" && event.status === "started" && ACTIVITY[event.node]) setLive((l) => (l ? { ...l, activity: ACTIVITY[event.node] } : l));
+            if (event.type === "delta") setLive((l) => (l ? { ...l, reply: l.reply + event.text } : l));
+            if (event.type === "outcome" && event.status === "applied") toast(event.text);
+            if (event.type === "view") setView(event.view);
+            if (event.type === "error") failed = event.message;
+          },
+          controller.signal,
+        );
+      } catch (e) {
+        if (controller.signal.aborted) failed = "You stopped the answer.";
+        else if (!toLogin(e)) failed = e instanceof ApiError ? e.message : "Connection lost.";
+      } finally {
+        abortRef.current = null;
+        setBusy(false);
+        setLive((l) => (l ? { ...l, active: false, activity: null, error: failed } : l));
+        setRunsVersion((n) => n + 1);
+        setConversationVersion((n) => n + 1);
+      }
+      return failed === null;
+    },
+    [sessionId, toLogin],
+  );
 
   const run = useCallback(
     async (command: Command): Promise<boolean> => {
@@ -77,9 +150,12 @@ export function GameClient() {
           res = await send();
         }
         setView(res.view);
-        if (command.type !== "talk") setNarration(res.result.narration);
+        setNarration(res.result.narration);
         for (const o of res.result.outcomes) if (o.status === "applied") toast(o.text);
-        if (command.type === "talk" || command.type === "give") setTab("talk");
+        if (command.type === "give") setTab("talk");
+        if (res.result.reactionError) toast.error(res.result.reactionError);
+        setConversationVersion((n) => n + 1);
+        setRunsVersion((n) => n + 1);
         return true;
       } catch (e) {
         if (!toLogin(e)) toast.error(e instanceof ApiError ? e.message : "Connection lost. Your last action may not have gone through.");
@@ -124,7 +200,7 @@ export function GameClient() {
 
   return (
     <div className="flex min-h-svh flex-col">
-      <Hud view={view} />
+      <Hud view={view} ai={ai} onOpenDebugger={() => setDebuggerOpen(true)} />
       <main className="mx-auto grid w-full max-w-[1500px] flex-1 gap-4 px-3 pt-4 pb-24 sm:px-5 lg:grid-cols-[320px_minmax(0,1fr)_360px] lg:pb-6">
         <div className={cn(tab === "city" ? "block" : "hidden", "lg:block")}>
           <CityPanel
@@ -140,13 +216,24 @@ export function GameClient() {
           />
         </div>
         <div className={cn(tab === "talk" ? "block" : "hidden", "lg:block")}>
-          <ChatTerminal npc={npc} conversation={conversation?.npc.key === npcKey ? conversation : null} credits={view.world.credits} run={run} busy={busy} />
+          <ChatTerminal
+            npc={npc}
+            conversation={conversation?.npc.key === npcKey ? conversation : null}
+            credits={view.world.credits}
+            run={run}
+            say={say}
+            onCancel={() => abortRef.current?.abort()}
+            live={live}
+            busy={busy}
+          />
         </div>
         <div className={cn(tab === "journal" ? "flex" : "hidden", "flex-col gap-4 lg:flex")}>
           <Journal view={view} />
           <EventFeed view={view} />
         </div>
       </main>
+
+      <AgentDebugger open={debuggerOpen} onOpenChange={setDebuggerOpen} sessionId={sessionId} liveEvents={liveEvents} refreshKey={runsVersion} />
 
       {/* Mobile navigation */}
       <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-3 border-t border-line bg-ink/95 backdrop-blur lg:hidden" aria-label="Game sections">

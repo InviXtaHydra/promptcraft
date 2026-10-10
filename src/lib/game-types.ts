@@ -83,7 +83,7 @@ export type SessionSummary = {
 export type OutcomeSummary = { type: string; status: "applied" | "skipped"; text: string };
 
 export type CommandResponse = {
-  result: { type: string; turn: number; narration: string[]; outcomes: OutcomeSummary[]; npcKey?: string; replayed: boolean };
+  result: { type: string; turn: number; narration: string[]; outcomes: OutcomeSummary[]; npcKey?: string; replayed: boolean; reactionError?: string };
   view: GameView;
 };
 
