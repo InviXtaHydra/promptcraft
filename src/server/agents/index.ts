@@ -16,7 +16,7 @@ export function createBrain(config: AiConfig): NpcBrain {
 }
 
 export function createEmbedder(config: AiConfig): Embedder {
-  return config.EMBEDDING_PROVIDER === "ollama" ? new OllamaEmbedder(config.OLLAMA_URL, config.OLLAMA_EMBED_MODEL) : new HashEmbedder();
+  return config.EMBEDDING_PROVIDER === "ollama" ? new OllamaEmbedder(config.OLLAMA_URL, config.OLLAMA_EMBED_MODEL, Math.min(30_000, config.AI_CALL_TIMEOUT_MS)) : new HashEmbedder();
 }
 
 /** The agent setup from the environment (DIALOGUE_PROVIDER, EMBEDDING_PROVIDER, OLLAMA_*). */

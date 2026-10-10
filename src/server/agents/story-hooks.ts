@@ -18,6 +18,17 @@ export function storyHooks(ctx: SessionContext, npcKey: string, message = ""): {
   const hints: string[] = [];
   const { state, content } = ctx;
 
+  // Friend prices: the NPC knows its threshold; whether the player earned it is the model's call
+  const npc = content.npcs.get(npcKey);
+  const trust = state.relationships.get(npcKey)?.trust ?? 0;
+  for (const offer of npc?.offers ?? []) {
+    if (offer.discountPrice !== null && offer.discountMinTrust !== null && trust < offer.discountMinTrust) {
+      hints.push(
+        `Your friend price for the ${offer.itemDefinition.name} (${offer.discountPrice} instead of ${offer.price} credits) needs trust ${offer.discountMinTrust}; yours is ${trust}. If the player gives you a real reason to trust them (by your rules), raise trust with change_trust.`,
+      );
+    }
+  }
+
   for (const quest of content.quests.values()) {
     const status = state.questStatus.get(quest.key);
     if (quest.giver?.key === npcKey && !status && !quest.autoStart && (!quest.requiresQuestKey || state.questStatus.get(quest.requiresQuestKey) === "COMPLETED")) {

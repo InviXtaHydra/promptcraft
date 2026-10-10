@@ -113,3 +113,19 @@ describe("OllamaChatModel", () => {
     await expect(model().structured(schema, msgs, { maxTokens: 50, signal: controller.signal })).rejects.toMatchObject({ code: "cancelled" });
   });
 });
+
+describe("OllamaEmbedder", () => {
+  it("times out instead of hanging, and reports an unreachable server", async () => {
+    const { OllamaEmbedder } = await import("@/server/ai/embeddings");
+    // A server that accepts the connection and never answers
+    const silent = http.createServer(() => undefined);
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", () => resolve()));
+    const url = `http://127.0.0.1:${(silent.address() as AddressInfo).port}`;
+    const started = Date.now();
+    await expect(new OllamaEmbedder(url, "nomic-embed-text", 300).embed(["x"], "query")).rejects.toMatchObject({ code: "timeout" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    silent.closeAllConnections();
+    await new Promise<void>((resolve) => silent.close(() => resolve()));
+    await expect(new OllamaEmbedder("http://127.0.0.1:9", "nomic-embed-text", 2_000).embed(["x"], "query")).rejects.toBeInstanceOf(ProviderError);
+  });
+});

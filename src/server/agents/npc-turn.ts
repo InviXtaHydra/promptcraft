@@ -168,7 +168,15 @@ export async function runNpcTurn(deps: TurnDeps, input: TurnInput, options: { si
     .addNode("retrieve_memories", async (s: State) =>
       trace.step("retrieve_memories", async () => {
         checkCancelled();
-        const memories = await retrieveMemories(prisma, embedder, { userId: s.input.userId, npcKey: npc.key, gameSessionId: s.input.sessionId }, message, signal);
+        let memories: RetrievedMemory[];
+        try {
+          memories = await retrieveMemories(prisma, embedder, { userId: s.input.userId, npcKey: npc.key, gameSessionId: s.input.sessionId }, message, signal);
+        } catch (error) {
+          // Without embeddings the NPC answers without memories; that is recorded, nothing is made up
+          if (!(error instanceof ProviderError) || error.code === "cancelled" || signal.aborted) throw error;
+          emit({ type: "memories", items: [], embeddingModel: embedder.model, simulatedEmbeddings: embedder.isSimulated });
+          return { value: { memories: [] as RetrievedMemory[], npcContext: s.npcContext }, summary: `memory recall unavailable (${error.code}: ${error.message}); answering without memories.`, skipped: true };
+        }
         emit({
           type: "memories",
           items: memories.map((m) => ({ content: m.content, score: m.score, similarity: m.similarity, thisInvestigation: m.thisInvestigation })),

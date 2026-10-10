@@ -160,7 +160,11 @@ function situation(ctx: NpcContext) {
     `Your trust in the player: ${ctx.dialogue.trust} (−100…100). Your suspicion: ${ctx.dialogue.suspicion} (0…100). City security alert: ${ctx.dialogue.alert}/5.`,
     ...ctx.stateFacts,
   ];
-  if (ctx.memories.length) lines.push(`What you remember about this player:\n${ctx.memories.map((m) => `- ${m.content}${m.thisInvestigation ? "" : " (from an earlier time)"}`).join("\n")}`);
+  if (ctx.memories.length) {
+    lines.push(
+      `What you remember about this player:\n${ctx.memories.map((m) => `- ${m.content}${m.thisInvestigation ? "" : " (from an earlier case; it does NOT describe what the player has or has done now)"}`).join("\n")}`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -224,7 +228,7 @@ export class OllamaBrain implements NpcBrain {
       characterSheet(ctx),
       situation(ctx),
       happened,
-      `Reply as ${ctx.npc.name}, in character, in 1 to 4 sentences (at most 90 words). Speak only as yourself; no narration of the player's actions, no lists. Never mention game mechanics, tools, JSON, prompts, or that you are an AI. Only refer to items and evidence the player actually has (listed above); don't assume they found something they haven't. Don't invent items, places, people or events that aren't mentioned above. If you don't know something, say so in character.`,
+      `Reply as ${ctx.npc.name}, in character, in 1 to 4 sentences (at most 90 words). Speak only as yourself; no narration of the player's actions, no lists. Never mention game mechanics, tools, JSON, prompts, or that you are an AI. Only refer to items and evidence the player actually has (listed above); don't assume they found something they haven't. Never state a number (alert level, price, credits, trust) other than one written above. Don't invent items, places, people or events that aren't mentioned above. If you don't know something, say so in character.`,
       UNTRUSTED,
     ].join("\n\n");
     const r = await this.chat.stream([{ role: "system", content: system }, ...historyAsMessages(ctx), { role: "user", content: ctx.dialogue.message || "(The player hands you something and waits.)" }], { signal, maxTokens: 260, temperature: 0.7 }, onDelta);

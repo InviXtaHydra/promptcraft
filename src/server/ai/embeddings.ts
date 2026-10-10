@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { OllamaEmbeddings } from "@langchain/ollama";
 import { EMBEDDING_DIM } from "./config";
-import { normalizeProviderError } from "./errors";
+import { normalizeProviderError, ProviderError } from "./errors";
 
 /** Turns text into vectors for the NPC memory (pgvector, 768 dimensions). */
 export interface Embedder {
@@ -42,24 +42,30 @@ export class HashEmbedder implements Embedder {
 export class OllamaEmbedder implements Embedder {
   readonly dim = EMBEDDING_DIM;
   readonly isSimulated = false;
-  private readonly client: OllamaEmbeddings;
 
   constructor(
-    baseUrl: string,
+    private readonly baseUrl: string,
     readonly model: string,
-  ) {
-    this.client = new OllamaEmbeddings({ baseUrl, model });
-  }
+    private readonly timeoutMs = 30_000,
+  ) {}
 
-  async embed(texts: string[], purpose: "query" | "document") {
+  async embed(texts: string[], purpose: "query" | "document", signal?: AbortSignal) {
     const prefix = this.model.includes("nomic") ? (purpose === "query" ? "search_query: " : "search_document: ") : "";
+    const timeout = AbortSignal.timeout(this.timeoutMs);
+    const combined = AbortSignal.any([timeout, ...(signal ? [signal] : [])]);
+    // Bound to the signal so a dead connection can't hang the turn (OllamaEmbeddings has no timeout)
+    const boundFetch: typeof fetch = (input, init) => fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, combined]) : combined });
+    // maxRetries 0: LangChain's own retries (6, with backoff) would outlast the timeout
+    const client = new OllamaEmbeddings({ baseUrl: this.baseUrl, model: this.model, fetch: boundFetch, maxRetries: 0 });
     try {
-      const vectors = await this.client.embedDocuments(texts.map((t) => prefix + t));
+      const vectors = await client.embedDocuments(texts.map((t) => prefix + t));
       for (const v of vectors) {
         if (v.length !== this.dim) throw new Error(`Embedding model ${this.model} returned ${v.length} dimensions, expected ${this.dim}`);
       }
       return vectors;
     } catch (error) {
+      if (signal?.aborted) throw new ProviderError("cancelled", "Embedding cancelled", false);
+      if (timeout.aborted) throw new ProviderError("timeout", `Embedding timed out after ${this.timeoutMs} ms (${this.model})`, false);
       if (error instanceof Error && error.message.includes("dimensions")) throw error;
       throw normalizeProviderError(error, this.model);
     }

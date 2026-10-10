@@ -248,3 +248,28 @@ describe("story rules", () => {
     expect(tool.status).toBe("EXECUTED");
   });
 });
+
+describe("when only the embeddings are down", () => {
+  it("answers without memories, says so in the trace, and keeps new memories for later embedding", async () => {
+    const { HashEmbedder } = await import("@/server/ai/embeddings");
+    const broken = new (class extends HashEmbedder {
+      override async embed(): Promise<number[][]> {
+        throw new ProviderError("model_missing", 'Model "nomic-embed-text" is not installed in Ollama', false);
+      }
+    })();
+    const game = await newGame();
+    const r = await (await import("@/server/agents/npc-turn")).runNpcTurn(
+      { ...game.deps, embedder: broken },
+      { userId: game.user.id, sessionId: game.session.id, npcKey: "balthazar", message: "hello", idempotencyKey: randomUUID() },
+    );
+    expect(r.reply).toMatch(/My courier, Juno/);
+    const step = await testPrisma.agentStep.findFirstOrThrow({ where: { runId: r.runId, node: "retrieve_memories" } });
+    expect(step.summary).toMatch(/^Skipped: memory recall unavailable \(model_missing/);
+    const rows = await testPrisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM "NPCMemory" WHERE "userId" = ${game.user.id} AND "embedding" IS NULL`;
+    expect(rows[0].n).toBeGreaterThan(0);
+    // With a working embedder again, the next turn backfills them
+    await game.talk("balthazar", "Where should I look?");
+    const after = await testPrisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM "NPCMemory" WHERE "userId" = ${game.user.id} AND "embedding" IS NULL`;
+    expect(after[0].n).toBe(0);
+  });
+});

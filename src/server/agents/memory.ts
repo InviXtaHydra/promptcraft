@@ -139,8 +139,14 @@ export async function consolidateMemories(
       skipped.push({ content, reason: `more than ${MAX_NEW_PER_TURN} new memories in one turn` });
       continue;
     }
-    const [vector] = await embedder.embed([content], "document", signal);
-    const near = await prisma.$queryRaw<{ similarity: number }[]>`
+    let vector: number[] | null = null;
+    try {
+      [vector] = await embedder.embed([content], "document", signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // Keep the memory without a vector; embedMissing adds it once the embedder is back
+    }
+    const near = vector === null ? [] : await prisma.$queryRaw<{ similarity: number }[]>`
       SELECT 1 - ("embedding" <=> ${toVectorLiteral(vector)}::vector) AS "similarity" FROM "NPCMemory"
       WHERE "userId" = ${scope.userId} AND "npcKey" = ${scope.npcKey} AND "embeddingModel" = ${embedder.model} AND "embedding" IS NOT NULL
       ORDER BY "embedding" <=> ${toVectorLiteral(vector)}::vector LIMIT 1`;
@@ -169,9 +175,14 @@ export async function consolidateMemories(
       skipped.push({ content, reason: "already remembered" });
       continue;
     }
-    await prisma.$executeRaw`UPDATE "NPCMemory" SET "embedding" = ${toVectorLiteral(vector)}::vector, "embeddingModel" = ${embedder.model} WHERE "id" = ${created[0].id}`;
+    if (vector) await prisma.$executeRaw`UPDATE "NPCMemory" SET "embedding" = ${toVectorLiteral(vector)}::vector, "embeddingModel" = ${embedder.model} WHERE "id" = ${created[0].id}`;
     stored.push({ id: created[0].id, content });
   }
-  const embedded = await embedMissing(prisma, embedder, scope, 20, signal);
+  let embedded = 0;
+  try {
+    embedded = await embedMissing(prisma, embedder, scope, 20, signal);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+  }
   return { stored, skipped, embedded };
 }

@@ -66,6 +66,8 @@ export class OllamaChatModel implements ChatModel {
     const boundFetch: typeof fetch = (input, init) => fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
     return new ChatOllama({
       fetch: boundFetch,
+      // Retries are ours (withRetries), counted in the trace; LangChain's own would hide them
+      maxRetries: 0,
       baseUrl: this.options.baseUrl,
       model: this.options.model,
       think: false,
