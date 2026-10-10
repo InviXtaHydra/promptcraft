@@ -1,0 +1,182 @@
+"use client";
+
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { FlaskConical, Gift, SendHorizontal, ShoppingCart } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import type { ConversationView, GameView } from "@/lib/game-types";
+import { cn } from "@/lib/utils";
+import type { Command } from "./game-client";
+
+type Npc = GameView["npcsHere"][number];
+
+export function ChatTerminal({
+  npc,
+  conversation,
+  credits,
+  run,
+  busy,
+}: {
+  npc: Npc | null;
+  conversation: ConversationView | null;
+  credits: number;
+  run: (command: Command) => Promise<boolean>;
+  busy: boolean;
+}) {
+  const [draft, setDraft] = useState("");
+  const listRef = useRef<HTMLDivElement>(null);
+  const reduce = useReducedMotion();
+  const messages = conversation?.messages ?? [];
+
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: reduce ? "auto" : "smooth" });
+  }, [messages.length, reduce]);
+
+  if (!npc) {
+    return (
+      <section className="frame grid min-h-[420px] place-items-center p-8 text-center" aria-label="Conversation">
+        <p className="max-w-xs text-dim">There&apos;s nobody to talk to here. Travel somewhere else, or investigate the area.</p>
+      </section>
+    );
+  }
+
+  async function say(text: string) {
+    const message = text.trim();
+    if (!message || busy) return;
+    const ok = await run({ type: "talk", npcKey: npc!.key, message });
+    if (ok) setDraft("");
+  }
+
+  function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    void say(draft);
+  }
+
+  const simulated = conversation?.provider.isSimulated ?? true;
+
+  return (
+    <section className="frame flex min-h-[520px] flex-col lg:h-[calc(100svh-7.5rem)]" style={{ ["--frame-accent" as string]: npc.accent }} aria-labelledby="chat-title">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-3">
+        <div className="min-w-0">
+          <h2 id="chat-title" className="font-display text-xl font-bold" style={{ color: npc.accent }}>
+            {npc.name}
+          </h2>
+          <p className="text-xs text-dim">
+            {npc.title}
+            {npc.faction ? ` · ${npc.faction}` : ""}
+          </p>
+        </div>
+        {simulated && (
+          <span
+            className="ml-auto inline-flex items-center gap-1.5 rounded border border-amber/50 bg-amber/10 px-2 py-1 font-mono text-[0.7rem] text-amber"
+            title="Replies come from a deterministic development script, not from a language model."
+          >
+            <FlaskConical className="size-3.5" aria-hidden="true" /> Simulated dialogue · scripted, not AI
+          </span>
+        )}
+      </header>
+
+      <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4" aria-live="polite" aria-label={`Conversation with ${npc.name}`}>
+        {messages.length === 0 && (
+          <p className="mx-auto max-w-sm py-10 text-center text-sm text-dim">
+            {npc.shortBio}
+            <br />
+            Say something to start the conversation.
+          </p>
+        )}
+        <AnimatePresence initial={false}>
+          {messages.map((m) => (
+            <motion.div
+              key={m.id}
+              initial={reduce ? false : { opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.25 }}
+              className={cn("flex", m.role === "PLAYER" ? "justify-end" : m.role === "SYSTEM" ? "justify-center" : "justify-start")}
+            >
+              {m.role === "SYSTEM" ? (
+                <p className="font-mono text-xs text-dim">{m.content}</p>
+              ) : (
+                <div
+                  className={cn(
+                    "max-w-[85%] rounded-md border px-3 py-2 text-sm",
+                    m.role === "PLAYER" ? "border-pink/40 bg-pink/10" : "border-line bg-panel-2",
+                  )}
+                  style={m.role === "NPC" ? { borderLeft: `3px solid ${npc.accent}` } : undefined}
+                >
+                  <p className="whitespace-pre-wrap">{m.content}</p>
+                  {m.role === "NPC" && m.isSimulated && <p className="mt-1 font-mono text-[0.65rem] text-amber/80">simulated</p>}
+                </div>
+              )}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+        {busy && (
+          <p className="font-mono text-xs text-dim" role="status">
+            {npc.name} is answering…
+          </p>
+        )}
+      </div>
+
+      {(npc.wants.length > 0 || npc.offers.length > 0) && (
+        <div className="flex flex-wrap gap-2 border-t border-line px-4 py-3" aria-label="Actions">
+          {npc.wants.map((w) => (
+            <Button key={w.itemKey} size="sm" disabled={busy} onClick={() => void run({ type: "give", npcKey: npc.key, itemKey: w.itemKey })}>
+              <Gift aria-hidden="true" /> Give {w.name}
+            </Button>
+          ))}
+          {npc.offers.map((o) => {
+            const blocked = o.owned || o.refused || credits < o.price;
+            return (
+              <Button
+                key={o.itemKey}
+                size="sm"
+                variant="outline"
+                disabled={busy || blocked}
+                onClick={() => void run({ type: "buy", npcKey: npc.key, itemKey: o.itemKey })}
+                title={o.owned ? "You already own this" : o.refused ? `${npc.name} won't trade at this alert level` : credits < o.price ? "Not enough credits" : o.description}
+                className="border-amber/50"
+              >
+                <ShoppingCart aria-hidden="true" />
+                {o.owned ? `${o.name} (owned)` : `Buy ${o.name} · ¤${o.price}${o.discounted ? " friend price" : ""}`}
+              </Button>
+            );
+          })}
+        </div>
+      )}
+
+      {conversation && conversation.suggestions.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-4 pt-3" aria-label="Suggestions">
+          {conversation.suggestions.map((s) => (
+            <button
+              key={s}
+              type="button"
+              disabled={busy}
+              onClick={() => void say(s)}
+              className="rounded-full border border-line px-3 py-1 text-xs text-dim transition-colors hover:border-cyan/60 hover:text-text disabled:opacity-50"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <form onSubmit={onSubmit} className="flex gap-2 p-4">
+        <label htmlFor="chat-input" className="sr-only">
+          Message to {npc.name}
+        </label>
+        <input
+          id="chat-input"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          maxLength={500}
+          placeholder={`Say something to ${npc.name}…`}
+          className="h-10 min-w-0 flex-1 rounded-md border border-input bg-ink px-3 font-mono text-sm outline-none placeholder:text-dim/70 focus-visible:border-cyan"
+          autoComplete="off"
+        />
+        <Button type="submit" disabled={busy || !draft.trim()} className="h-10 px-4" aria-label="Send">
+          <SendHorizontal aria-hidden="true" />
+        </Button>
+      </form>
+    </section>
+  );
+}

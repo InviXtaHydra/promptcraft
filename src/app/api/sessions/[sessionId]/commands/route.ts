@@ -27,6 +27,5 @@ export const POST = route(async (request: NextRequest, { params }: Context) => {
     idempotencyKey: body.idempotencyKey,
     provider: getDialogueProvider(),
   });
-  const { agentRunId: _hidden, ...publicResult } = result;
-  return NextResponse.json({ result: publicResult, view: await buildGameView(prisma, sessionId, user.id, user.callsign) });
+  return NextResponse.json({ result, view: await buildGameView(prisma, sessionId, user.id, user.callsign) });
 });
