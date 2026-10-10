@@ -1,5 +1,6 @@
 import type { ConversationView, GameView } from "@/lib/game-types";
-import type { DialogueProvider, Persona } from "../dialogue/types";
+import { mockDialogueProvider } from "../dialogue/mock";
+import type { Persona } from "../dialogue/types";
 import { notFound } from "../errors";
 import type { PrismaClient } from "../prisma-client";
 import { priceFor, refusesTrade } from "./commands";
@@ -96,8 +97,17 @@ export async function buildGameView(prisma: PrismaClient, sessionId: string, use
   };
 }
 
-/** The conversation with one NPC in this save game, plus deterministic suggestions for the next line. */
-export async function getConversation(prisma: PrismaClient, sessionId: string, userId: string, npcKey: string, provider: DialogueProvider): Promise<ConversationView> {
+/**
+ * The conversation with one NPC in this save game. `provider` describes who voices the NPCs; the
+ * suggestion chips always come from the deterministic script (they are player prompts, not NPC lines).
+ */
+export async function getConversation(
+  prisma: PrismaClient,
+  sessionId: string,
+  userId: string,
+  npcKey: string,
+  provider: { id: string; model: string; isSimulated: boolean },
+): Promise<ConversationView> {
   const ctx = await loadSessionContext(prisma, sessionId, userId);
   const npc = ctx.content.npcs.get(npcKey);
   if (!npc) throw notFound("NPC");
@@ -115,7 +125,7 @@ export async function getConversation(prisma: PrismaClient, sessionId: string, u
     reachable,
     messages: (conversation?.messages ?? []).map((m) => ({ id: m.id, role: m.role, content: m.content, isSimulated: m.isSimulated, createdAt: m.createdAt.toISOString() })),
     suggestions: reachable
-      ? provider.suggestions({
+      ? mockDialogueProvider.suggestions({
           npc: { key: npc.key, name: npc.name, persona: npc.persona as Persona },
           previousPlayerMessages: conversation?.messages.filter((m) => m.role === "PLAYER").length ?? 0,
           trust: rel.trust,

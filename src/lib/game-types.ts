@@ -86,3 +86,48 @@ export type CommandResponse = {
   result: { type: string; turn: number; narration: string[]; outcomes: OutcomeSummary[]; npcKey?: string; replayed: boolean };
   view: GameView;
 };
+
+export type RunSummary = {
+  id: string;
+  npc: { key: string; name: string } | null;
+  provider: string;
+  model: string;
+  simulated: boolean;
+  status: "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+  startedAt: string;
+  latencyMs: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  modelCalls: number;
+  retries: number;
+  transitions: number;
+  tools: { total: number; rejected: number };
+  error: string | null;
+  playerMessage: string | null;
+};
+
+export type RunDetail = RunSummary & {
+  estimatedCostUsd: number | null;
+  steps: { index: number; node: string; status: string; summary: string; durationMs: number | null; data: unknown }[];
+  toolExecutions: { id: string; tool: string; status: string; arguments: unknown; result: unknown; rejectionReason: string | null }[];
+  messages: { role: "PLAYER" | "NPC" | "SYSTEM"; content: string; simulated: boolean }[];
+};
+
+/** Events of the live turn stream (POST /api/sessions/{id}/talk) */
+export type TurnStreamEvent =
+  | { type: "run_started"; runId: string; npcKey: string; provider: string; model: string; simulated: boolean }
+  | { type: "node"; node: string; status: "started" | "succeeded" | "failed" | "skipped"; summary?: string; durationMs?: number; data?: unknown }
+  | { type: "memories"; items: { content: string; score: number; similarity: number; thisInvestigation: boolean }[]; embeddingModel: string; simulatedEmbeddings: boolean }
+  | { type: "tool"; tool: string; source: string; status: "proposed" | "rejected" | "executed"; args?: unknown; reason?: string; result?: unknown }
+  | { type: "outcome"; text: string; status: "applied" | "skipped" }
+  | { type: "delta"; text: string }
+  | { type: "usage"; inputTokens: number; outputTokens: number; modelCalls: number; retries: number }
+  | { type: "view"; view: GameView }
+  | { type: "done"; messageId: string | null; reply: string | null; turn: number | null; replayed: boolean }
+  | { type: "error"; code: string; message: string };
+
+export type AiStatusView = {
+  dialogue: { provider: string; model: string; simulated: boolean };
+  embeddings: { model: string; simulated: boolean };
+  ollama: { url: string; reachable: boolean; chatModelInstalled: boolean; embedModelInstalled: boolean } | null;
+};

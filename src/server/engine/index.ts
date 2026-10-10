@@ -38,7 +38,7 @@ const summarize = (o: AppliedOutcome): OutcomeSummary =>
  */
 export async function executeCommand(
   prisma: PrismaClient,
-  input: { userId: string; sessionId: string; command: unknown; idempotencyKey: unknown; provider: DialogueProvider },
+  input: { userId: string; sessionId: string; command: unknown; idempotencyKey: unknown; reactions: DialogueProvider | null },
 ): Promise<CommandResult> {
   const parsed = commandSchema.safeParse(input.command);
   if (!parsed.success) throw new GameError(422, "invalid_command", parsed.error.issues[0]?.message ?? "Invalid command");
@@ -63,7 +63,7 @@ export async function executeCommand(
 
       const ctx = await loadSessionContext(tx, session.id, input.userId);
       const handler = handlers[command.type] as (deps: Parameters<(typeof handlers)["travel"]>[0], cmd: Command) => ReturnType<(typeof handlers)["travel"]>;
-      const handled = await handler({ tx, ctx, provider: input.provider }, command);
+      const handled = await handler({ tx, ctx, reactions: input.reactions }, command);
       const questOutcomes = await evaluateQuests(tx, ctx);
 
       const turn = ctx.state.turn + 1;

@@ -13,7 +13,6 @@ const key = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]*$/);
 export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("travel"), locationKey: key }),
   z.object({ type: z.literal("investigate") }),
-  z.object({ type: z.literal("talk"), npcKey: key, message: z.string().trim().min(1, "Say something").max(500, "Keep it under 500 characters") }),
   z.object({ type: z.literal("give"), npcKey: key, itemKey: key }),
   z.object({ type: z.literal("buy"), npcKey: key, itemKey: key }),
 ]);
@@ -26,7 +25,8 @@ export type HandlerResult = {
   npcKey?: string;
 };
 
-type Deps = { tx: TransactionClient; ctx: SessionContext; provider: DialogueProvider };
+/** `reactions`: the scripted provider for NPC reactions to items, or null when a model reacts after the commit */
+type Deps = { tx: TransactionClient; ctx: SessionContext; reactions: DialogueProvider | null };
 
 function reachableNpc(ctx: SessionContext, npcKey: string) {
   const npc = ctx.content.npcs.get(npcKey);
@@ -118,85 +118,8 @@ async function dialogueContext(tx: TransactionClient, ctx: SessionContext, npcKe
   };
 }
 
-/**
- * One NPC turn, recorded as an AgentRun with its steps and proposed effects (tool calls), so the
- * AgentDebugger (Phase 2) can show exactly what was proposed, rejected and executed.
- */
-async function talk({ tx, ctx, provider }: Deps, cmd: Extract<Command, { type: "talk" }>): Promise<HandlerResult> {
-  const npc = reachableNpc(ctx, cmd.npcKey);
-  const started = Date.now();
-  const conversation = await tx.conversation.upsert({
-    where: { gameSessionId_npcId: { gameSessionId: ctx.sessionId, npcId: npc.id } },
-    create: { gameSessionId: ctx.sessionId, npcId: npc.id },
-    update: {},
-  });
-  const run = await tx.agentRun.create({
-    data: { gameSessionId: ctx.sessionId, userId: ctx.userId, npcId: npc.id, provider: provider.id, model: provider.model, isSimulated: provider.isSimulated },
-  });
-  let index = 0;
-  let last = Date.now();
-  const step = async (node: string, summary: string, data?: object) => {
-    const now = Date.now();
-    const row = await tx.agentStep.create({ data: { runId: run.id, index: index++, node, status: "SUCCEEDED", summary, data: data ?? undefined, durationMs: now - last } });
-    last = now;
-    return row.id;
-  };
 
-  await tx.message.create({ data: { conversationId: conversation.id, role: "PLAYER", content: cmd.message } });
-  await step("validate_request", "Message accepted (1–500 characters, NPC reachable from the current location).");
-  const dctx = await dialogueContext(tx, ctx, npc.key, cmd.message, conversation.id);
-  await step("load_state", `Loaded state: trust ${dctx.trust}, suspicion ${dctx.suspicion}, alert ${dctx.alert}.`);
-  await step("retrieve_memories", `${dctx.memories.length} of ${npc.name}'s memories of this player, by importance.`, { memories: dctx.memories });
-
-  const answer = await provider.reply(dctx);
-  await step("interpret", answer.summary, { intent: answer.intent, provider: provider.id, model: provider.model, simulated: provider.isSimulated });
-
-  const checks = checkProposals(ctx, npc.key, answer.proposals);
-  const policyStepId = await step(
-    "policy_check",
-    `${checks.filter((c) => c.ok).length} of ${checks.length} proposed actions allowed for ${npc.name}.`,
-    { rejected: checks.filter((c) => !c.ok).map((c) => (c.ok ? null : c.reason)) },
-  );
-
-  const outcomes: AppliedOutcome[] = [];
-  for (const check of checks) {
-    if (!check.ok) {
-      await tx.toolExecution.create({
-        data: { runId: run.id, stepId: policyStepId, toolName: toolName(check.raw), arguments: (check.raw ?? {}) as object, status: "REJECTED", rejectionReason: check.reason },
-      });
-      continue;
-    }
-    const applied = await applyEffects(tx, ctx, [check.effect], { kind: "npc", npcKey: npc.key });
-    outcomes.push(...applied);
-    const first = applied[0];
-    await tx.toolExecution.create({
-      data: {
-        runId: run.id,
-        stepId: policyStepId,
-        toolName: check.effect.type,
-        arguments: check.effect,
-        status: first?.status === "applied" ? "EXECUTED" : "REJECTED",
-        result: applied.map((o) => ({ status: o.status, ...(o.status === "applied" ? { text: o.text ?? null } : { reason: o.reason }) })),
-        rejectionReason: first?.status === "skipped" ? `engine: ${first.reason}` : null,
-      },
-    });
-  }
-  await step("execute", `${outcomes.filter((o) => o.status === "applied").length} state changes applied by the engine.`);
-
-  ctx.state.talkedTo.add(npc.key);
-  await tx.message.create({
-    data: { conversationId: conversation.id, role: "NPC", content: answer.text, provider: provider.id, isSimulated: provider.isSimulated, agentRunId: run.id },
-  });
-  await tx.nPCRelationship.update({ where: { gameSessionId_npcId: { gameSessionId: ctx.sessionId, npcId: npc.id } }, data: { lastInteractionAt: new Date() } });
-  await step("respond", provider.isSimulated ? "Reply from the deterministic mock script (simulated, not AI-generated)." : "Reply generated.");
-  await tx.agentRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", finishedAt: new Date(), latencyMs: Date.now() - started } });
-
-  return { narration: [], outcomes, agentRunId: run.id, npcKey: npc.key };
-}
-
-const toolName = (raw: unknown) => (raw && typeof raw === "object" && "type" in raw && typeof raw.type === "string" ? raw.type.slice(0, 40) : "unknown");
-
-async function give({ tx, ctx, provider }: Deps, cmd: Extract<Command, { type: "give" }>): Promise<HandlerResult> {
+async function give({ tx, ctx, reactions }: Deps, cmd: Extract<Command, { type: "give" }>): Promise<HandlerResult> {
   const npc = reachableNpc(ctx, cmd.npcKey);
   const item = ctx.content.items.get(cmd.itemKey);
   if (!item || !ctx.state.inventory.has(item.key)) throw rejected("not_owned", "You don't have that");
@@ -222,13 +145,11 @@ async function give({ tx, ctx, provider }: Deps, cmd: Extract<Command, { type: "
     create: { gameSessionId: ctx.sessionId, npcId: npc.id },
     update: {},
   });
-  const reaction = await provider.reactToItem(await dialogueContext(tx, ctx, npc.key, "", conversation.id), item.key);
-  await tx.message.createMany({
-    data: [
-      { conversationId: conversation.id, role: "SYSTEM", content: `You hand ${npc.name} the ${item.name}.` },
-      { conversationId: conversation.id, role: "NPC", content: reaction.text, provider: provider.id, isSimulated: provider.isSimulated },
-    ],
-  });
+  await tx.message.create({ data: { conversationId: conversation.id, role: "SYSTEM", content: `You hand ${npc.name} the ${item.name}.` } });
+  if (reactions) {
+    const reaction = await reactions.reactToItem(await dialogueContext(tx, ctx, npc.key, "", conversation.id), item.key);
+    await tx.message.create({ data: { conversationId: conversation.id, role: "NPC", content: reaction.text, provider: reactions.id, isSimulated: reactions.isSimulated } });
+  }
   return { narration: [`You hand ${npc.name} the ${item.name}.`], outcomes, npcKey: npc.key };
 }
 
@@ -257,4 +178,4 @@ async function buy({ tx, ctx }: Deps, cmd: Extract<Command, { type: "buy" }>): P
   return { narration: [`You pay ${price} credits${discounted ? " (friend price)" : ""} and pocket the ${item.name}.`], outcomes: await applyEffects(tx, ctx, effects, { kind: "engine" }) };
 }
 
-export const handlers = { travel, investigate, talk, give, buy } satisfies Record<Command["type"], (deps: Deps, cmd: never) => Promise<HandlerResult>>;
+export const handlers = { travel, investigate, give, buy } satisfies Record<Command["type"], (deps: Deps, cmd: never) => Promise<HandlerResult>>;
