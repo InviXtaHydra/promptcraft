@@ -1,4 +1,5 @@
 import "server-only";
+import { unstable_rethrow } from "next/navigation";
 import { NextResponse, type NextRequest } from "next/server";
 import { ZodError } from "zod";
 import { GameError } from "./errors";
@@ -12,6 +13,8 @@ export function route<C>(handler: (request: NextRequest, context: C) => Promise<
     try {
       return await handler(request, context);
     } catch (error) {
+      // Next.js signals (prerender bail-out, redirect, notFound) must reach Next.js itself
+      unstable_rethrow(error);
       if (error instanceof GameError) return NextResponse.json({ error: { code: error.code, message: error.message } }, { status: error.status });
       if (error instanceof ZodError) {
         return NextResponse.json({ error: { code: "invalid_input", message: error.issues[0]?.message ?? "Invalid input" } }, { status: 422 });
