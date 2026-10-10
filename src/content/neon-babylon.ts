@@ -146,6 +146,7 @@ export const neonBabylon: z.input<typeof scenarioSchema> = {
       baseTrust: 10,
       baseSuspicion: 10,
       allowedEffects: ["quest_start", "objective", "trust", "suspicion", "memory", "world_event", "evidence"],
+      allowedTools: ["get_inventory", "inspect_evidence", "search_known_memories", "update_quest", "change_trust", "record_world_event"],
       persona: {
         personality: "Gruff, sentimental under the rust, talks in repair metaphors. Loyal to the Slums above all.",
         background:
@@ -184,6 +185,7 @@ export const neonBabylon: z.input<typeof scenarioSchema> = {
       baseTrust: 0,
       baseSuspicion: 20,
       allowedEffects: ["trust", "suspicion", "memory", "world_event", "faction"],
+      allowedTools: ["get_inventory", "inspect_evidence", "search_known_memories", "change_trust", "change_reputation", "record_world_event"],
       persona: {
         personality: "Sharp, amused, always calculating. Warm to people who keep their word, ice to people who don't.",
         background: "Grew up in the Bazaar's cable ducts and built a business tracing data for anyone who can pay.",
@@ -217,6 +219,7 @@ export const neonBabylon: z.input<typeof scenarioSchema> = {
       baseTrust: -10,
       baseSuspicion: 40,
       allowedEffects: ["suspicion", "alert", "world_event", "memory", "faction"],
+      allowedTools: ["search_known_memories", "change_trust", "trigger_security_alert", "change_reputation", "record_world_event"],
       persona: {
         personality: "Courteous, literal, relentless. Treats every question as a possible intrusion attempt.",
         background: "Aether Dynamics' fourth-generation security intelligence, responsible for the tower and its relays.",

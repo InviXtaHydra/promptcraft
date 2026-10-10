@@ -54,6 +54,9 @@ changing the engine, and keep `docs/PHASE_STATUS.md` and the checklist in
   `validateScenarioReferences` must report no errors.
 - Bounds (trust −100…100, suspicion 0…100, alert 0…5, credits ≥ 0) live in `BOUNDS` and in CHECK
   constraints in the first migration. Change both together.
+- The HNSW index `NPCMemory_embedding_hnsw_idx` can't be expressed in the Prisma schema, so
+  `migrate dev` / `migrate diff` propose `DROP INDEX "NPCMemory_embedding_hnsw_idx"`. Delete that line
+  from any new migration.
 - `prisma migrate reset` deletes data; Prisma blocks it for agents without explicit user consent.
   Don't work around that.
 

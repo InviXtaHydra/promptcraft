@@ -37,6 +37,7 @@ model User {
   agentRuns    AgentRun[]
   auditLogs    AuditLog[]
   scenarios    Scenario[]     @relation("ScenarioAuthor")
+  memories     NPCMemory[]
 }
 
 /// A signed-in browser. Only the SHA-256 hash of the cookie token is stored.
@@ -169,6 +170,8 @@ model NPC {
   baseSuspicion     Int      @default(0)
   /// Effect types this NPC may propose; the engine rejects anything else (see src/server/engine/policy.ts)
   allowedEffects    String[]
+  /// Tools this NPC may call (src/server/agents/tools.ts); checked server-side on every call
+  allowedTools      String[] @default([])
   /// Structured character definition (personality, goals, known facts, secrets, …), used by the AI in Phase 2
   persona           Json
 
@@ -619,7 +622,12 @@ enum MemoryKind {
 /// What an NPC remembers about this player in this session. Phase 1 writes memories for story beats
 /// deterministically; Phase 2 adds embeddings (pgvector) and semantic retrieval.
 model NPCMemory {
-  id             String                 @id @default(cuid())
+  id             String                      @id @default(cuid())
+  /// The player this memory is about. Memories follow the player across investigations.
+  userId         String
+  /// Stable NPC key (scenario versions change NPC ids, not keys)
+  npcKey         String
+  /// The investigation the memory was formed in (provenance; recall prefers the current one)
   gameSessionId  String
   npcId          String
   kind           MemoryKind
@@ -628,18 +636,20 @@ model NPCMemory {
   importance     Int
   /// SHA-256 of the normalised content, for deduplication
   contentHash    String
-  /// Where the memory came from, e.g. "event:<GameEvent id>"
+  /// Where the memory came from, e.g. "engine:turn:3" or "run:<AgentRun id>"
   provenance     String
-  /// pgvector column; dimension is fixed in Phase 2 together with the embedding model
-  embedding      Unsupported("vector")?
+  /// pgvector embedding; the dimension matches EMBEDDING_DIM (768) and the embedding model below
+  embedding      Unsupported("vector(768)")?
   embeddingModel String?
-  createdAt      DateTime               @default(now())
+  createdAt      DateTime                    @default(now())
   lastRecalledAt DateTime?
 
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   gameSession GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
   npc         NPC         @relation(fields: [npcId], references: [id], onDelete: Cascade)
 
-  @@unique([gameSessionId, npcId, contentHash])
+  @@unique([userId, npcKey, gameSessionId, contentHash])
+  @@index([userId, npcKey, createdAt])
   @@index([gameSessionId, npcId, createdAt])
 }
 
@@ -654,20 +664,30 @@ enum RunStatus {
 
 /// One NPC turn: from the player's message to the NPC's reply, including proposed and executed effects.
 model AgentRun {
-  id            String    @id @default(cuid())
-  gameSessionId String
-  userId        String
-  npcId         String?
-  provider      String
-  model         String
-  isSimulated   Boolean
-  status        RunStatus @default(RUNNING)
-  startedAt     DateTime  @default(now())
-  finishedAt    DateTime?
-  latencyMs     Int?
-  inputTokens   Int?
-  outputTokens  Int?
-  error         String?
+  id               String    @id @default(cuid())
+  gameSessionId    String
+  userId           String
+  npcId            String?
+  provider         String
+  model            String
+  isSimulated      Boolean
+  status           RunStatus @default(RUNNING)
+  startedAt        DateTime  @default(now())
+  finishedAt       DateTime?
+  latencyMs        Int?
+  inputTokens      Int?
+  outputTokens     Int?
+  /// Model calls retried after a transient error
+  retries          Int       @default(0)
+  /// Graph transitions taken (bounded)
+  transitions      Int       @default(0)
+  /// Number of model calls made in this run
+  modelCalls       Int       @default(0)
+  /// Estimated cost in USD. 0 for local models; always an estimate, never a billed amount
+  estimatedCostUsd Decimal?  @db.Decimal(10, 6)
+  /// The player's idempotency key for this turn
+  idempotencyKey   String?
+  error            String?
 
   gameSession GameSession     @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
   user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -676,6 +696,7 @@ model AgentRun {
   tools       ToolExecution[]
   messages    Message[]
 
+  @@unique([gameSessionId, idempotencyKey])
   @@index([gameSessionId, startedAt])
   @@index([userId, startedAt])
 }

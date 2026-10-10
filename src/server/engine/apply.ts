@@ -189,6 +189,8 @@ async function applyOne(tx: TransactionClient, ctx: SessionContext, effect: Effe
       const created = await tx.nPCMemory.createMany({
         data: [
           {
+            userId: ctx.userId,
+            npcKey: npc.key,
             gameSessionId: sessionId,
             npcId: npc.id,
             kind: effect.kind,

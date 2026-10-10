@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TOOL_NAMES } from "@/server/agents/tool-names";
 import { EFFECT_TYPES, effectListSchema } from "@/server/engine/effects";
 
 /**
@@ -68,6 +69,7 @@ export const scenarioSchema = z.object({
       baseTrust: z.number().int(),
       baseSuspicion: z.number().int(),
       allowedEffects: z.array(z.enum(EFFECT_TYPES as [string, ...string[]])),
+      allowedTools: z.array(z.enum(TOOL_NAMES)).default([]),
       persona: personaSchema,
       offers: z
         .array(

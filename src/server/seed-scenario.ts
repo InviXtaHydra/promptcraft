@@ -80,6 +80,7 @@ export async function seedScenario(prisma: PrismaClient, input: z.input<typeof s
           baseTrust: n.baseTrust,
           baseSuspicion: n.baseSuspicion,
           allowedEffects: n.allowedEffects,
+          allowedTools: n.allowedTools,
           persona: n.persona,
         },
       });
