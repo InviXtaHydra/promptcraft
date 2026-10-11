@@ -3,6 +3,7 @@ import { unstable_rethrow } from "next/navigation";
 import { NextResponse, type NextRequest } from "next/server";
 import { ZodError } from "zod";
 import { GameError } from "./errors";
+import { log } from "./log";
 
 /**
  * Wraps a route handler: GameErrors become JSON with their status, validation errors become 422,
@@ -19,7 +20,7 @@ export function route<C>(handler: (request: NextRequest, context: C) => Promise<
       if (error instanceof ZodError) {
         return NextResponse.json({ error: { code: "invalid_input", message: error.issues[0]?.message ?? "Invalid input" } }, { status: 422 });
       }
-      console.error(JSON.stringify({ level: "error", route: request.nextUrl.pathname, method: request.method, error: error instanceof Error ? error.message : String(error) }));
+      log("error", "unhandled_route_error", { route: request.nextUrl.pathname, method: request.method, error });
       return NextResponse.json({ error: { code: "internal", message: "Something went wrong on our side. Try again." } }, { status: 500 });
     }
   };
