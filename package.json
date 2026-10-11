@@ -16,7 +16,8 @@
     "test": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "test:all": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "user:role": "tsx scripts/set-role.mts"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
@@ -41,6 +42,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.64.0",
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^24.19.2",

@@ -6,7 +6,8 @@ import { testDatabaseUrl } from "./test-database";
 
 /**
  * Brings the test database to the current schema and seeds the scenario. The test database belongs
- * to the tests alone, so leftover players from an earlier run are removed (cascades to their games).
+ * to the tests alone, so leftover players from an earlier run are removed (cascades to their games),
+ * along with the Creator Mode scenarios the tests made.
  */
 export default async function setup() {
   const url = testDatabaseUrl();
@@ -14,6 +15,7 @@ export default async function setup() {
   const prisma = createPrismaClient(url);
   try {
     await prisma.user.deleteMany({});
+    await prisma.scenario.deleteMany({ where: { slug: { not: neonBabylon.slug } } });
     await seedScenario(prisma, neonBabylon);
   } finally {
     await prisma.$disconnect();
