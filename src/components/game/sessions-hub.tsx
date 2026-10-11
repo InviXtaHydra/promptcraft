@@ -3,11 +3,11 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ArrowRight, LogOut, MapPin, Plus } from "lucide-react";
+import { ArrowRight, LogOut, MapPin, PenTool, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { api, ApiError } from "@/lib/api-client";
-import type { SessionSummary } from "@/lib/game-types";
+import type { ScenarioSummary, SessionSummary } from "@/lib/game-types";
 import { useAuthRedirect } from "./use-auth-redirect";
 
 const when = (iso: string) => new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso));
@@ -15,7 +15,9 @@ const when = (iso: string) => new Intl.DateTimeFormat("en-GB", { dateStyle: "med
 export function SessionsHub() {
   const router = useRouter();
   const toLogin = useAuthRedirect();
-  const [me, setMe] = useState<{ callsign: string } | null>(null);
+  const [me, setMe] = useState<{ callsign: string; role: string } | null>(null);
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [scenarioSlug, setScenarioSlug] = useState<string>("");
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -23,12 +25,14 @@ export function SessionsHub() {
   useEffect(() => {
     const controller = new AbortController();
     Promise.all([
-      api<{ user: { callsign: string } }>("/api/auth/me", { signal: controller.signal }),
+      api<{ user: { callsign: string; role: string } }>("/api/auth/me", { signal: controller.signal }),
       api<{ sessions: SessionSummary[] }>("/api/sessions", { signal: controller.signal }),
+      api<{ scenarios: ScenarioSummary[] }>("/api/scenarios", { signal: controller.signal }),
     ])
-      .then(([meRes, list]) => {
+      .then(([meRes, list, playable]) => {
         setMe(meRes.user);
         setSessions(list.sessions);
+        setScenarios(playable.scenarios);
       })
       .catch((e) => {
         if (controller.signal.aborted || toLogin(e)) return;
@@ -40,7 +44,7 @@ export function SessionsHub() {
   async function start() {
     setStarting(true);
     try {
-      const { session } = await api<{ session: { id: string } }>("/api/sessions", { method: "POST", body: {} });
+      const { session } = await api<{ session: { id: string } }>("/api/sessions", { method: "POST", body: scenarioSlug ? { scenarioSlug } : {} });
       router.push(`/play/${session.id}`);
     } catch (e) {
       if (!toLogin(e)) toast.error(e instanceof ApiError ? e.message : "Couldn't start an investigation");
@@ -60,6 +64,11 @@ export function SessionsHub() {
           Prompt<span className="text-pink">Craft</span>
         </Link>
         <div className="flex items-center gap-3 text-sm">
+          {me && (me.role === "CREATOR" || me.role === "ADMIN") && (
+            <Link href="/creator" className="inline-flex items-center gap-1 text-dim transition-colors hover:text-text">
+              <PenTool className="size-3.5" aria-hidden="true" /> Creator Mode
+            </Link>
+          )}
           {me && <span className="font-mono text-cyan">{me.callsign}</span>}
           <Button variant="ghost" size="sm" onClick={signOut}>
             <LogOut aria-hidden="true" /> Sign out
@@ -72,9 +81,27 @@ export function SessionsHub() {
           <h1 className="font-display text-4xl font-bold">Your investigations</h1>
           <p className="mt-2 text-dim">Every investigation is its own save game. Progress is saved after every action.</p>
         </div>
-        <Button onClick={start} disabled={starting} className="h-10 px-5 font-display font-semibold">
-          <Plus aria-hidden="true" /> {starting ? "Opening a case…" : "New investigation"}
-        </Button>
+        <div className="flex flex-col gap-2 sm:items-end">
+          {scenarios.length > 1 && (
+            <label className="flex flex-col gap-1 text-sm text-dim">
+              Scenario
+              <select
+                value={scenarioSlug}
+                onChange={(e) => setScenarioSlug(e.target.value)}
+                className="h-9 rounded-md border border-line bg-panel px-2 text-text focus-visible:outline-2 focus-visible:outline-cyan"
+              >
+                {scenarios.map((sc, i) => (
+                  <option key={sc.slug} value={i === 0 ? "" : sc.slug}>
+                    {sc.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <Button onClick={start} disabled={starting} className="h-10 px-5 font-display font-semibold">
+            <Plus aria-hidden="true" /> {starting ? "Opening a case…" : "New investigation"}
+          </Button>
+        </div>
       </div>
 
       <section className="mt-10" aria-live="polite" aria-busy={sessions === null && !error}>

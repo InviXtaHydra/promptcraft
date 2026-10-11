@@ -209,6 +209,14 @@ export function GameClient() {
     <div className="flex min-h-svh flex-col">
       <Hud view={view} ai={ai} onOpenDebugger={() => setDebuggerOpen(true)} />
       <div className="px-3 pt-4 sm:px-5">
+        {view.session.isPreview && (
+          <p role="status" className="mb-3 rounded border border-amber/50 bg-amber/10 px-4 py-2 text-sm text-amber">
+            Preview run of a Creator Mode draft. It isn&apos;t listed with your investigations and doesn&apos;t change any published scenario.{" "}
+            <Link href="/creator" className="underline underline-offset-2">
+              Back to Creator Mode
+            </Link>
+          </p>
+        )}
         <EndingBanner view={view} />
       </div>
       <ChoiceDialog view={view} run={run} busy={busy} />

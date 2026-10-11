@@ -33,7 +33,7 @@ export async function buildGameView(prisma: PrismaClient, sessionId: string, use
     .flatMap((q) => q.objectives.filter((o) => o.kind === "DELIVER_ITEM" && !state.objectivesDone.has(objectiveId(q.key, o.key))));
 
   return {
-    session: { id: session.id, status: session.status, scenarioTitle: content.title, turn: state.turn },
+    session: { id: session.id, status: session.status, scenarioTitle: content.title, turn: state.turn, isPreview: session.isPreview },
     player: { callsign },
     world: { credits: state.credits, alert: state.alert },
     location: {

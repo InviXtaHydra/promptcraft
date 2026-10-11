@@ -6,7 +6,7 @@ export type Reliability = "CONFIRMED" | "LIKELY" | "UNVERIFIED" | "DISPUTED";
 export type Severity = "INFO" | "NOTICE" | "WARNING" | "CRITICAL";
 
 export type GameView = {
-  session: { id: string; status: "ACTIVE" | "COMPLETED" | "ABANDONED"; scenarioTitle: string; turn: number };
+  session: { id: string; status: "ACTIVE" | "COMPLETED" | "ABANDONED"; scenarioTitle: string; turn: number; isPreview: boolean };
   player: { callsign: string };
   world: { credits: number; alert: number };
   location: {
@@ -149,3 +149,5 @@ export type SimulationTickView = {
   actions: { intention: string; actor: string; title: string; status: "executed" | "rejected" | "skipped"; reason?: string; outcomes: { status: string; text: string }[] }[];
   replayed: boolean;
 };
+
+export type ScenarioSummary = { slug: string; title: string; summary: string };
