@@ -18,7 +18,10 @@ flowchart LR
     Apply --> DB[("PostgreSQL 16<br/>+ pgvector")]
     Memory --> DB
     Brain --> Ollama[["Ollama on this machine"]]
+    Sim["City simulation<br/>intentions · every N turns"] -->|"checked effects"| Tools
+    API --> Sim
     Content["Scenario content<br/>src/content (Zod)"] -->|"prisma db seed"| DB
+    Creator["Creator Mode<br/>drafts → validate → preview / publish"] -->|"new immutable version"| DB
 ```
 
 ## Layers
@@ -33,6 +36,7 @@ flowchart LR
 | Agents | `src/server/agents/` | The LangGraph NPC turn, the `NpcBrain` (Ollama or mock), tools, memory, story rules, traces, runs for the debugger. |
 | Dialogue script | `src/server/dialogue/` | The deterministic mock script (Phase 1), now behind the `MockBrain`. |
 | Content | `src/content/` | The authored scenario as typed data plus its Zod schema and reference validation. |
+| Creator | `src/server/creator/` | Drafts, validation with paths, isolated previews and publishing new versions (Phase 3). |
 | Data | `prisma/` | Schema, migrations, seed. Prisma 7 with the `pg` driver adapter; client generated into `src/generated/prisma`. |
 
 ### Why the game screen is a client component
@@ -48,12 +52,16 @@ in Phase 2, the streaming chat.
 Two kinds of data, kept apart:
 
 - **Scenario content** (`Scenario → ScenarioVersion → Location, Faction, NPC, ItemDefinition,
-  Quest, QuestObjective, Evidence, LocationLoot, MerchantOffer`). Written by the seed, never by
-  gameplay. A version is immutable once seeded; a `GameSession` pins the version it started on,
-  so editing content (Creator Mode, Phase 3) never changes a running save game.
+  Quest, QuestObjective, Evidence, LocationLoot, MerchantOffer`, and since Phase 3 `Suspect,
+  EvidenceLink, Choice, NpcIntention, Ending`). Written by the seed or by Creator Mode, never by
+  gameplay. A published version is immutable; a `GameSession` pins the version it started on, so
+  publishing a new version never changes a running save game. `ScenarioVersion.definition` keeps
+  the full JSON the version was made from (status `DRAFT`, `PREVIEW` or `PUBLISHED`).
 - **Player state** (`User → GameSession → WorldState, LocationAccess, NPCRelationship,
   FactionReputation, InventoryItem, CollectedLoot, QuestState, ObjectiveProgress,
-  DiscoveredEvidence, Conversation, Message, WorldEvent, GameEvent, NPCMemory, AgentRun`).
+  DiscoveredEvidence, Conversation, Message, WorldEvent, GameEvent, NPCMemory, AgentRun`, and
+  since Phase 3 `PlayerChoice, Hypothesis, CaseFile, SimulationState, SimulationTick,
+  IntentionRun`).
   Everything hangs off one `GameSession` owned by one user; deleting a user cascades.
 
 Integrity is enforced twice: by the engine and by the database (unique constraints such as one
@@ -67,9 +75,10 @@ Integrity is enforced twice: by the engine and by the database (unique constrain
 
 ### Commands
 
-`executeCommand(prisma, { userId, sessionId, command, idempotencyKey, provider })` accepts five
-commands (Zod schema in `commands.ts`): `travel`, `investigate`, `talk`, `give`, `buy`. One
-command is one transaction:
+`executeCommand(prisma, { userId, sessionId, command, idempotencyKey, reactions })` accepts the
+commands in `commands.ts` (Zod schema): `travel`, `investigate`, `give`, `buy`, and since Phase 3
+`choose`, `save_hypothesis`, `discard_hypothesis` and `submit_case`. Talking is an NPC turn (see
+the turn graph). One command is one transaction:
 
 1. Load the session **for this user** (else 404) and lock its `WorldState` row
    (`SELECT … FOR UPDATE`), so commands for one session run one at a time.
@@ -87,7 +96,7 @@ command is one transaction:
 
 Every state change is an effect (`effects.ts`): `credits`, `item_grant`, `item_remove`,
 `evidence`, `trust`, `suspicion`, `alert`, `faction`, `unlock_location`, `quest_start`,
-`objective`, `world_event`, `memory`. Effects use content keys, never database ids, so nothing a
+`objective`, `world_event`, `memory`, `offer_choice`. Effects use content keys, never database ids, so nothing a
 client or a model sends can point at another player's rows.
 
 `applyEffects` is the only writer. Each effect is checked against the current state, written, and
@@ -108,6 +117,76 @@ state and are completed by the engine only. `DELIVER_ITEM` is completed by the `
 `ASK_ABOUT` can be proposed by the recipient NPC but requires the player to hold the evidence.
 Quests and objectives carry data-driven `onCompleteEffects` (unlock a location, change
 reputation, record a world event or memory), validated when the scenario is seeded.
+
+Phase 3 adds `TRUST_AT_LEAST` (follows from state) and `CLOSE_CASE` (completed only by
+`submit_case`). Locations can list `unlockItemKeys`: holding any of those items opens them, which
+is how both the forged clearance and Balthazar's keycard open Aether Tower.
+
+### Conditions
+
+`conditions.ts` defines data-driven conditions used by intentions and story content: quest and
+objective status, evidence and items held, alert above or below a level, trust, suspicion and
+reputation thresholds, memory kinds an NPC holds about the player, world events, choices offered or
+made, locations visited and the simulation tick. `holds(condition, state)` is pure and unit-tested.
+
+## The investigation (Phase 3)
+
+Project Genesis is the third quest. Its data lives in the scenario: suspects, evidence (with
+provenance: found in a location, given by an NPC, disputed testimony), typed `EvidenceLink`s
+(`SUPPORTS`, `CONTRADICTS`, `LEADS_TO`, `IMPLICATES`, `EXONERATES`), choices and endings.
+
+- **Visible links** (`investigation.ts`): a link is shown only when the player knows both ends, so
+  the evidence network grows as the case does.
+- **Hypotheses**: a theory is a suspect plus up to eight pieces of discovered evidence (at most
+  ten per session). `assessHypothesis` scores it from the visible links (implicates +1, exonerates
+  −2, supports or leads to +0.5, contradicts −0.5) into *strong*, *plausible*, *weak* or
+  *contradicted*, with reasons. Theories never change the world.
+- **Submitting the case** needs the open `CLOSE_CASE` objective and only accepts discovered
+  evidence. `chooseEnding` picks the first ending whose conditions hold (a choice made, suspects,
+  required evidence, at least one of a group); a fallback ending without conditions is required by
+  the schema. The case file, the ending's effects, a world event and the session's `COMPLETED`
+  status are written in one transaction, and a closed session refuses further commands.
+- **Solvable without any one NPC**: the decisive evidence lies in Aether Tower, which two
+  independent items open (Kira's forged clearance, or the keycard from Balthazar's side quest).
+  NPCs only know what their persona says they know.
+
+## The city simulation (Phase 3)
+
+`simulation.ts` moves the world between the player's actions, without model calls:
+
+- **When**: after every N player turns (`autoTick`, idempotency key `turn:<n>`), or on a manual
+  step in development. A tick runs in one transaction with the session's row lock; a repeated key
+  replays nothing. Paused or closed sessions are skipped (except manual steps).
+- **What**: each `NpcIntention` (an NPC's or faction's goal with conditions and effects, once or
+  repeatable with a cooldown) whose conditions hold. At most `maxActionsPerTick` actions per tick
+  and one per actor.
+- **How**: NPC intentions go through the same `checkProposals` policy as dialogue; faction
+  intentions may only record world events and change reputations by at most 10. Approved effects
+  go through `applyEffects`, then quests are evaluated. Every action is stored (`IntentionRun`,
+  `SimulationTick.actions` with executed, rejected or skipped and the reason) and executed ones
+  appear as world events in the city feed.
+- **Controls**: `GET/POST /api/sessions/{id}/simulation` (history; pause, resume, step with an
+  idempotency key). Outside development only creators and admins may use them.
+
+## Creator Mode (Phase 3)
+
+`src/server/creator/` and `/api/creator/*`, for users with the `CREATOR` or `ADMIN` role
+(`npm run user:role`):
+
+1. **Fork** a published scenario into a draft (`DRAFT` version holding the JSON definition) with
+   a new slug, owned by the creator.
+2. **Save** the draft as is, up to 400 KB. Invalid drafts are kept; the response lists every
+   problem with its path (Zod schema issues, then the reference checks). The slug can't change.
+3. **Preview**: validate, then materialise the definition as a new `PREVIEW` version and start an
+   `isPreview` session on it. Previews aren't listed with the player's investigations, and a
+   normal game can't start on a preview version.
+4. **Publish**: validate, then materialise a new `PUBLISHED` version. New investigations get it;
+   running ones keep theirs.
+
+`materializeVersion` (shared with the seed) writes all content rows from a validated definition in
+one transaction. The editor (`/creator/[versionId]`) has forms for the overview, the simulation's
+pace and NPCs (persona, trust, tools and effects), JSON editors for every other section, and a
+validation panel. Every step is in the audit log.
 
 ## AI providers (Phase 2)
 
@@ -247,7 +326,27 @@ or not, tokens, model calls, retries, transitions, latency and the estimated cos
   graph steps with timings, recalled memories with similarity and score, tool calls with arguments,
   policy decisions and results, the database changes, tokens, retries and errors.
 
+## Advanced observability (Phase 3)
+
+- `GET /api/sessions/{id}/runs` filters by NPC and status; the debugger lists
+  runs and compares two side by side (latency, tokens, tools, time per node).
+- `GET /api/sessions/{id}/metrics` (`metrics.ts`): run counts by status, latency p50/p95 and tokens
+  (*measured*), cost (*estimated*, 0 for local models), tool calls by tool and the top rejection
+  reasons, retrieval quality (turns with memories, average recalled, top similarity, score), time
+  per graph node and simulation totals.
+- `POST /api/sessions/{id}/runs/{runId}/replay`: a **dry run** that checks a recorded run's tool
+  calls again against today's rules and state and shows then versus now. Nothing is executed.
+- The debugger's Simulation tab shows every tick and action with its reason.
+
+## Logging
+
+`src/server/log.ts` writes one JSON line per event and redacts before writing: sensitive keys
+(passwords, tokens, cookies, messages, prompts) are replaced, and credentials in URLs, bearer
+tokens, session cookies and email addresses are scrubbed from strings.
+
 ## Security
+
+See [SECURITY.md](SECURITY.md) for the full Phase 3 review.
 
 | Concern | Measure |
 |---|---|
@@ -257,7 +356,8 @@ or not, tokens, model calls, retries, transitions, latency and the estimated cos
 | Authorization | Every read and command resolves the session through `userId`; foreign sessions are 404 |
 | Input | Zod on every body; content keys restricted to `[a-z0-9-]`; messages 1–500 characters |
 | Abuse | In-memory rate limits for register, login (per email and IP), commands and new sessions; max 5 open investigations |
-| Errors | Players see `GameError` messages; anything else is a generic 500 and is logged without bodies, cookies or passwords |
+| Errors | Players see `GameError` messages; anything else is a generic 500 and is logged as redacted JSON |
+| Headers | `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, COOP; no `X-Powered-By` |
 | Open redirects | `?next=` after sign-in only accepts paths inside the app |
 
 Limitations: rate limits are per process (a multi-instance deployment needs a shared store such as
@@ -277,6 +377,12 @@ Redis); there is no password reset or email verification yet.
   embedder failure, trace authorization.
 - **Live** (`tests/integration/ollama-live.test.ts`, only with `OLLAMA_LIVE=1`): a real turn with
   qwen3:8b and nomic-embed-text, including a prompt-injection attempt.
+- **Phase 3 integration**: both routes through Project Genesis, all six endings, the bribe,
+  hypotheses, case-file rules, the simulation (conditions, budget, one action per actor, idempotency, pause, a repeatable
+  intention's cooldown, owner only),
+  metrics and replay, Creator Mode (permissions, validation, preview isolation, immutable
+  publishing), and prompt injection with a hijacked brain.
 - **End-to-end** (`e2e/`): Playwright against a production build (`next start`) on the test
   database (mock brain): both quests in a browser, persistence after reload, sign-in redirects, a
-  foreign game, the phone layout, the AgentDebugger.
+  foreign game, the phone layout, the AgentDebugger, the case board, metrics and simulation tabs,
+  Creator Mode, and axe-core accessibility checks of the main screens.

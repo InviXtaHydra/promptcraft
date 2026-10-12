@@ -52,18 +52,23 @@ provider abstraction keeps the same shape, so another provider can be added late
 | AgentDebugger: run id, nodes and transitions, status, memories with scores, tool proposals and validated args, policy decisions, results, state changes, tokens, latency, retries and errors, provider and model; expandable, filterable, streaming, empty and error states | ✅ | `agent-debugger.tsx`, SSE |
 | Verification | ✅ | see PHASE_STATUS |
 
-## Phase 3: the living city (not started)
+## Phase 3: the living city
 
-| Requirement | Status |
-|---|---|
-| Bounded autonomous simulation with pause/resume/step in development | ⬜ |
-| Multi-path Project Genesis investigation: evidence graph, suspects, contradictions, hypotheses, dependencies, optional objectives, faction consequences, multiple endings | ⬜ |
-| Creator Mode with validation, separate permissions, isolated preview | 🟡 `UserRole.CREATOR`, immutable versions and `validateScenarioReferences` exist |
-| Advanced observability (filters, comparison, metrics, replay) | ⬜ |
-| Production hardening review and full test suite | ⬜ |
-| Portfolio release docs, diagram, walkthrough, case study | ⬜ |
+| Requirement | Status | Notes |
+|---|---|---|
+| Bounded autonomous simulation: permission-checked, through the engine, recorded as world events, idempotent; pause/resume/step in development; no loops or model calls | ✅ | `simulation.ts`; every N turns, budget per tick, one action per actor |
+| Multi-path Project Genesis: evidence provenance and links, suspects, contradictory testimony, hypotheses, quest dependencies, optional objectives, faction consequences, multiple endings | ✅ | `investigation.ts`, scenario v4; six endings |
+| Solvable without an NPC's trust; NPCs don't reveal what they don't know; outcome from evidence and choices | ✅ | two routes into the tower; secrets gated by trust; `chooseEnding` |
+| Creator Mode: NPCs, goals, locations, items, quests, evidence, tools, initial state, simulation parameters; validation first; separate permissions; isolated preview | ✅ | `src/server/creator/`, `/creator` |
+| Advanced observability: run filters, comparison, tool metrics, retrieval quality, cost and latency (measured vs estimated), simulation history, safe replay | ✅ | `metrics.ts`, debugger tabs |
+| Production hardening review; unit, integration, security, e2e tests | ✅ | `docs/SECURITY.md`; open items listed there |
+| Portfolio release: README, `.env.example`, docs, seeded demo, diagram, checklist, screenshots, case study, walkthrough | ✅ | `README.md`, `docs/` |
 
 ## Decisions
 
 - **Model providers (2026-10-10):** Ollama only (qwen3:8b for dialogue, nomic-embed-text for
   memory), free and local. The mock provider stays for tests and offline play.
+- **Simulation without models (2026-10-11):** NPC autonomy is authored as data-driven
+  intentions, not generated, so it stays bounded, testable and free.
+- **Creator Mode as JSON definitions (2026-10-11):** a draft is the scenario's JSON; it is validated
+  by the same schema as the seed and materialised into a new immutable version.
