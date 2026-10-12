@@ -45,6 +45,9 @@ describe("Creator Mode", () => {
     const schema = await saveDraft(testPrisma, creator, draftId, broken);
     expect(schema.ok).toBe(false);
     expect(schema.issues[0].path).toBe("npcs.0.baseTrust");
+    // Out of the engine's bounds (trust −100…100) is caught here, not by a database constraint later
+    const tooTrusting = await saveDraft(testPrisma, creator, draftId, { ...definition, npcs: definition.npcs.map((n, i) => (i === 0 ? { ...n, baseTrust: 500 } : n)) });
+    expect(tooTrusting.issues).toEqual([expect.objectContaining({ path: "npcs.0.baseTrust" })]);
 
     // A reference problem: an NPC in a place that doesn't exist
     const dangling = { ...definition, npcs: definition.npcs.map((n, i) => (i === 0 ? { ...n, locationKey: "atlantis" } : n)) };

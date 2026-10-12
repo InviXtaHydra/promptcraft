@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { TOOL_NAMES } from "@/server/agents/tool-names";
 import { conditionListSchema } from "@/server/engine/conditions";
-import { EFFECT_TYPES, effectListSchema } from "@/server/engine/effects";
+import { BOUNDS, EFFECT_TYPES, effectListSchema } from "@/server/engine/effects";
 
 /**
  * The authored world as data. The seed script validates a scenario against this schema and checks
@@ -10,6 +10,9 @@ import { EFFECT_TYPES, effectListSchema } from "@/server/engine/effects";
 
 const key = z.string().regex(/^[a-z0-9][a-z0-9-]*$/);
 const hex = z.string().regex(/^#[0-9a-f]{6}$/i);
+// The same bounds as the engine and the database CHECK constraints
+const trust = z.number().int().min(BOUNDS.trust.min).max(BOUNDS.trust.max);
+const suspicion = z.number().int().min(BOUNDS.suspicion.min).max(BOUNDS.suspicion.max);
 
 export const personaSchema = z.object({
   personality: z.string(),
@@ -19,7 +22,7 @@ export const personaSchema = z.object({
   knownFacts: z.array(z.string()),
   beliefs: z.array(z.string()),
   uncertainties: z.array(z.string()),
-  secrets: z.array(z.object({ fact: z.string(), revealAtTrust: z.number().int() })),
+  secrets: z.array(z.object({ fact: z.string(), revealAtTrust: trust })),
   trustThresholds: z.record(z.string(), z.number().int()),
   behavioralRules: z.array(z.string()).min(1),
 });
@@ -40,7 +43,7 @@ export const scenarioSchema = z.object({
   title: z.string(),
   summary: z.string(),
   version: z.number().int().positive(),
-  startingCredits: z.number().int().nonnegative(),
+  startingCredits: z.number().int().nonnegative().max(1_000_000),
   startingItems: z.array(z.object({ itemKey: key, quantity: z.number().int().positive() })),
   factions: z.array(z.object({ key, name: z.string(), description: z.string(), accent: hex })),
   locations: z.array(
@@ -79,8 +82,8 @@ export const scenarioSchema = z.object({
       locationKey: key,
       reachableFrom: z.array(key).default([]),
       factionKey: key.optional(),
-      baseTrust: z.number().int(),
-      baseSuspicion: z.number().int(),
+      baseTrust: trust,
+      baseSuspicion: suspicion,
       allowedEffects: z.array(z.enum(EFFECT_TYPES as [string, ...string[]])),
       allowedTools: z.array(z.enum(TOOL_NAMES)).default([]),
       persona: personaSchema,
@@ -90,7 +93,7 @@ export const scenarioSchema = z.object({
             itemKey: key,
             price: z.number().int().nonnegative(),
             discountPrice: z.number().int().nonnegative().optional(),
-            discountMinTrust: z.number().int().optional(),
+            discountMinTrust: trust.optional(),
           }),
         )
         .default([]),

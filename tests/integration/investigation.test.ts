@@ -93,6 +93,10 @@ describe("Project Genesis", () => {
     const kiraTrustAfter = (await testPrisma.nPCRelationship.findFirstOrThrow({ where: { gameSessionId: wrong.session.id, npc: { key: "kira" } } })).trust;
     expect(kiraTrustAfter).toBe(kiraTrustBefore - 50);
 
+    const fixer = await intoTheTowerViaKira();
+    await fixer.run({ type: "submit_case", suspectKey: "balthazar", evidenceKeys: ["genesis-lab-log"] });
+    expect((await view(fixer)).investigation.ending?.key).toBe("wrong-fixer");
+
     const dismissed = await intoTheTowerViaKira();
     await dismissed.run({ type: "submit_case", suspectKey: "hale-imura", evidenceKeys: ["relay-map-receipt"] });
     expect((await view(dismissed)).investigation.ending?.key).toBe("case-dismissed");
