@@ -123,7 +123,7 @@ export function ChatTerminal({
                   style={m.role === "NPC" ? { borderLeft: `3px solid ${npc.accent}` } : undefined}
                 >
                   <p className="whitespace-pre-wrap">{m.content}</p>
-                  {m.role === "NPC" && (m.isSimulated ? <p className="mt-1 font-mono text-[0.65rem] text-amber/80">simulated</p> : <p className="mt-1 font-mono text-[0.65rem] text-cyan/70">AI · {model}</p>)}
+                  {m.role === "NPC" && (m.isSimulated ? <p className="mt-1 font-mono text-[0.65rem] text-amber">simulated</p> : <p className="mt-1 font-mono text-[0.65rem] text-cyan">AI · {model}</p>)}
                 </div>
               )}
             </motion.div>

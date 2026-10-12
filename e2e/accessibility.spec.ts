@@ -4,6 +4,8 @@ import { registerNewPlayer, setRole, startInvestigation } from "./helpers";
 
 /** WCAG 2.1 A/AA checks with axe-core. Serious and critical violations fail the test. */
 async function expectNoSeriousViolations(page: Page, label: string) {
+  // Measure the settled screen, not a fade-in halfway through
+  await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => undefined))));
   const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
   const serious = results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
   const summary = serious.map((v) => `${v.id} (${v.impact}): ${v.help}\n  ${v.nodes.slice(0, 3).map((n) => n.target.join(" ")).join("\n  ")}`);
@@ -11,6 +13,7 @@ async function expectNoSeriousViolations(page: Page, label: string) {
 }
 
 test("the main screens have no serious accessibility violations", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
   await expectNoSeriousViolations(page, "landing");
   await page.goto("/login");
